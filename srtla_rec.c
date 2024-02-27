@@ -669,6 +669,14 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
+  // Set receive buffer size to 32MB
+  int rcv_buf = 32 * 1024 * 1024;
+  ret = setsockopt(srtla_sock, SOL_SOCKET, SO_RCVBUF, &rcv_buf, sizeof(rcv_buf));
+  if (ret < 0) {
+    perror("failed to set socket rcv buffer size");
+    exit(EXIT_FAILURE);
+  }
+
   ret = bind(srtla_sock, (const struct sockaddr *)&listen_addr, addr_len);
   if (ret < 0) {
     perror("bind failed");
