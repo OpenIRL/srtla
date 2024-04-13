@@ -37,26 +37,25 @@ extern "C" {
 #define RECV_ACK_INT 10
 
 struct srtla_conn {
-  struct srtla_conn *next = nullptr;
-  struct sockaddr addr = {};
-  time_t last_rcvd;
-  int recv_idx;
-  uint32_t recv_log[RECV_ACK_INT];
+    struct sockaddr addr = {};
+    time_t last_rcvd;
+    int recv_idx;
+    uint32_t recv_log[RECV_ACK_INT];
 };
 
 typedef std::shared_ptr<srtla_conn> srtla_conn_ptr;
 
 struct srtla_conn_group {
-  srtla_conn *conns = nullptr;
-  time_t created_at;
-  int srt_sock;
-  struct sockaddr last_addr;
-  std::array<char, SRTLA_ID_LEN> id;
+    std::array<char, SRTLA_ID_LEN> id;
+    std::vector<srtla_conn_ptr> conns;
+    time_t created_at;
+    int srt_sock = -1;
+    struct sockaddr last_addr;
 };
 
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
 
 struct srtla_ack_pkt {
-  uint32_t type;
-  uint32_t acks[RECV_ACK_INT];
+    uint32_t type;
+    uint32_t acks[RECV_ACK_INT];
 };
