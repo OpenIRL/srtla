@@ -33,12 +33,18 @@
 #define SRTLA_TYPE_REG_NGP   0x9211
 #define SRTLA_TYPE_REG_NAK   0x9212
 
+#define SRTLA_EXT_IRLTK_CIP_REQ 0xA000
+#define SRTLA_EXT_IRLTK_CIP_RES 0xA001
+
 #define SRT_MIN_LEN          16
 
 #define SRTLA_ID_LEN         256
 #define SRTLA_TYPE_REG1_LEN  (2 + (SRTLA_ID_LEN))
 #define SRTLA_TYPE_REG2_LEN  (2 + (SRTLA_ID_LEN))
 #define SRTLA_TYPE_REG3_LEN  2
+
+#define SRTLA_EXT_IRLTK_CIP_REQ_LEN 2
+#define SRTLA_EXT_IRLTK_CIP_RES_LEN (2 + sizeof(srtla_pkt_irltk_cip_res))
 
 typedef struct __attribute__((__packed__)) {
   uint16_t type;
@@ -61,6 +67,11 @@ typedef struct __attribute__((__packed__)) {
   uint32_t syn_cookie;
   char     peer_ip[16];
 } srt_handshake_t;
+
+typedef struct __attribute__((__packed__)) {
+  uint8_t address_family;
+  uint8_t address[16];
+} srtla_ext_irltk_cip_res;
 
 int get_seconds(time_t *s);
 int get_ms(uint64_t *ms);
