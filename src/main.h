@@ -42,7 +42,6 @@ struct srtla_conn {
     int recv_idx;
     uint32_t recv_log[RECV_ACK_INT];
 };
-
 typedef std::shared_ptr<srtla_conn> srtla_conn_ptr;
 
 struct srtla_conn_group {
@@ -52,7 +51,6 @@ struct srtla_conn_group {
     int srt_sock = -1;
     struct sockaddr last_addr;
 };
-
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
 
 struct srtla_ack_pkt {

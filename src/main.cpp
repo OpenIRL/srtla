@@ -46,16 +46,14 @@ const socklen_t addr_len = sizeof(struct sockaddr);
 std::vector<srtla_conn_group_ptr> conn_groups;
 
 /*
-
 Async I/O support
-
 */
 int socket_epoll;
 
-int epoll_add(int fd, uint32_t events, void *userdata) {
+int epoll_add(int fd, uint32_t events, void *priv_data) {
   struct epoll_event ev={0};
   ev.events = events;
-  ev.data.ptr = userdata;
+  ev.data.ptr = priv_data;
   return epoll_ctl(socket_epoll, EPOLL_CTL_ADD, fd, &ev);
 }
 
@@ -64,11 +62,8 @@ int epoll_rem(int fd) {
   return epoll_ctl(socket_epoll, EPOLL_CTL_DEL, fd, &ev);
 }
 
-
 /*
-
 Misc helper functions
-
 */
 void print_help() {
   fprintf(stderr, "Syntax: srtla_rec [-v] SRTLA_LISTEN_PORT SRT_HOST SRT_PORT\n\n-v      Print the version and exit\n");
@@ -100,37 +95,40 @@ std::vector<char> get_random_bytes(size_t size)
   return ret;
 }
 
+inline void srtla_send_reg_err(struct sockaddr *addr)
+{
+  uint16_t header = htobe16(SRTLA_TYPE_REG_ERR);
+  sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
+}
+
 /*
-
 Connection and group management functions
-
 */
 srtla_conn_group_ptr group_find_by_id(char *id) {
   for (auto &group : conn_groups) {
     if (const_time_cmp(group->id.begin(), id, SRTLA_ID_LEN) == 0)
       return group;
   }
-
   return nullptr;
 }
 
-int group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_conn_ptr &rc) {
+void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_conn_ptr &rc) {
   for (auto &group : conn_groups) {
     for (auto &conn : group->conns) {
       if (const_time_cmp(&(conn->addr), addr, addr_len) == 0) {
         rg = group;
         rc = conn;
-        return 1;
+        return;
       }
     }
     if (const_time_cmp(&group->last_addr, addr, addr_len) == 0) {
       rg = group;
       rc = nullptr;
-      return 0;
+      return;
     }
   }
-
-  return -1;
+  rg = nullptr;
+  rc = nullptr;
 }
 
 srtla_conn_group_ptr group_create(char *client_id, time_t ts) {
@@ -167,125 +165,112 @@ int group_destroy(srtla_conn_group_ptr g) {
 }
 
 int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
-  srtla_conn_group_ptr g;
-  srtla_conn_ptr c;
-  int ret;
-  uint16_t header;
-  char *id;
-
   if (conn_groups.size() >= MAX_GROUPS) {
-    spdlog::error("{}:{}: Group count is {}, rejecting group registration", print_addr(addr), port_no(addr), conn_groups.size());
-    goto err;
+    srtla_send_reg_err(addr);
+    spdlog::error("{}:{}: Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
+    return -1;
   }
 
   // If this remote address is already registered, abort
-  ret = group_find_by_addr(addr, g, c);
-  if (ret != -1)
-    goto err;
+  srtla_conn_group_ptr group;
+  srtla_conn_ptr conn;
+  group_find_by_addr(addr, group, conn);
+  if (group) {
+    srtla_send_reg_err(addr);
+    spdlog::error("{}:{}: Group registration failed: Remote address already registered to group", print_addr(addr), port_no(addr));
+    return -1;
+  }
 
   // Allocate the group
-  id = in_buf + 2;
-  g = group_create(id, ts);
-  if (!g)
-    goto err;
+  char *id = in_buf + 2;
+  group = group_create(id, ts);
 
   /* Record the address used to register the group
      It won't be allowed to register another group while this one is active */
-  g->last_addr = *addr;
+  group->last_addr = *addr;
 
   // Build a REG2 packet
   char out_buf[SRTLA_TYPE_REG2_LEN];
-  header = htobe16(SRTLA_TYPE_REG2);
-  memcpy(out_buf, &header, sizeof(header));
-  memcpy(out_buf + sizeof(header), g->id.begin(), SRTLA_ID_LEN);
+  uint16_t header = htobe16(SRTLA_TYPE_REG2);
+  std::memcpy(out_buf, &header, sizeof(header));
+  std::memcpy(out_buf + sizeof(header), group->id.begin(), SRTLA_ID_LEN);
 
   // Send the REG2 packet
-  ret = sendto(srtla_sock, &out_buf, sizeof(out_buf), 0, addr, addr_len);
-  if (ret != sizeof(out_buf))
-    goto err;
+  int ret = sendto(srtla_sock, &out_buf, sizeof(out_buf), 0, addr, addr_len);
+  if (ret != sizeof(out_buf)) {
+    spdlog::error("{}:{}: Group registration failed: Send error", print_addr(addr), port_no(addr));
+    return -1;
+  }
 
-  spdlog::info("{}:{}: Group {} registered", print_addr(addr), port_no(addr), static_cast<void *>(g.get()));
+  conn_groups.push_back(group);
 
-  conn_groups.push_back(g);
-
+  spdlog::info("{}:{}: Group {} registered", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
-
-err:
-  spdlog::error("{}:{}: Group registration failed", print_addr(addr), port_no(addr));
-  header = htobe16(SRTLA_TYPE_REG_ERR);
-  sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
-  return -1;
 }
 
 int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
-  srtla_conn_group_ptr g, tmp;
-  srtla_conn_ptr c;
-  int ret;
-  uint16_t header;
-  bool already_registered = true;
-
   char *id = in_buf + 2;
-  g = group_find_by_id(id);
-  if (!g) {
+  srtla_conn_group_ptr group = group_find_by_id(id);
+  if (!group) {
     uint16_t header = htobe16(SRTLA_TYPE_REG_NGP);
     sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
-    goto err_early;
+    spdlog::error("{}:{}: Connection registration failed: No group found", print_addr(addr), port_no(addr));
+    return -1;
   }
 
   /* If the connection is already registered, we'll allow it to register
      again to the same group, but not to a new one */
-  ret = group_find_by_addr(addr, tmp, c);
-  if (ret != -1 && tmp != g)
-    goto err;
+  srtla_conn_group_ptr tmp;
+  srtla_conn_ptr conn;
+  group_find_by_addr(addr, tmp, conn);
+  if (tmp && tmp != group) {
+    srtla_send_reg_err(addr);
+    spdlog::error("{}:{}: Connection registration for group {} failed: Provided group ID mismatch", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+    return -1;
+  }
 
   /* If the connection is already registered to the group, we can
      just skip ahead to sending the SRTLA_REG3 */
-  if (ret != 1) {
-    int conn_count = g->conns.size();
-    if (conn_count >= MAX_CONNS_PER_GROUP)
-      goto err;
+  bool already_registered = true;
+  if (!conn) {
+    if (group->conns.size() >= MAX_CONNS_PER_GROUP) {
+      srtla_send_reg_err(addr);
+      spdlog::error("{}:{}: Connection registration for group {} failed: Max group conns reached", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+      return -1;
+    }
 
-    c = std::make_shared<srtla_conn>();
-    c->addr = *addr;
-    c->recv_idx = 0;
-    c->last_rcvd = ts;
+    conn = std::make_shared<srtla_conn>();
+    conn->addr = *addr;
+    conn->recv_idx = 0;
+    conn->last_rcvd = ts;
 
     already_registered = false;
   }
 
-  header = htobe16(SRTLA_TYPE_REG3);
-  ret = sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
-  if (ret != sizeof(header))
-    goto err;
+  uint16_t header = htobe16(SRTLA_TYPE_REG3);
+  int ret = sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
+  if (ret != sizeof(header)) {
+    spdlog::error("{}:{}: Connection registration for group {} failed: Socket send error", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+    return -1;
+  }
 
   if (!already_registered)
-    g->conns.push_back(c);
+    group->conns.push_back(conn);
 
   // If it all worked, mark this peer as the most recently active one
-  g->last_addr = *addr;
+  group->last_addr = *addr;
 
-  spdlog::info("{}:{} (group {}): Connection registration", print_addr(addr), port_no(addr), static_cast<void *>(g.get()));
+  spdlog::info("{}:{} (group {}): Connection registration", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
-
-err:
-  header = htobe16(SRTLA_TYPE_REG_ERR);
-  sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
-
-err_early:
-  spdlog::error("{}:{}: Connection registration for group {} failed", print_addr(addr), port_no(addr), static_cast<void *>(g.get()));
-  return -1;
 }
 
 /*
-
 The main network event handlers
 
 Resource limits:
   * connections per group MAX_CONNS_PER_GROUP
   * total groups          MAX_GROUPS
-
 */
-
 void handle_srt_data(srtla_conn_group_ptr g) {
   char buf[MTU];
 
@@ -335,8 +320,7 @@ void register_packet(srtla_conn_group_ptr g, srtla_conn_ptr c, int32_t sn) {
 }
 
 void handle_srtla_data(time_t ts) {
-  char buf[MTU];
-  int ret;
+  char buf[MTU] = {};
 
   // Get the packet
   struct sockaddr srtla_addr;
@@ -361,8 +345,9 @@ void handle_srtla_data(time_t ts) {
   // Check that the peer is a member of a connection group, discard otherwise
   srtla_conn_group_ptr g;
   srtla_conn_ptr c;
-  ret = group_find_by_addr(&srtla_addr, g, c);
-  if (ret != 1) return;
+  group_find_by_addr(&srtla_addr, g, c);
+  if (!g || !c)
+    return;
 
   // Update the connection's use timestamp
   c->last_rcvd = ts;
@@ -413,7 +398,7 @@ void handle_srtla_data(time_t ts) {
     }
   }
 
-  ret = send(g->srt_sock, &buf, n, 0);
+  int ret = send(g->srt_sock, &buf, n, 0);
   if (ret != n) {
     spdlog::error("Group {}: failed to forward the srtla packet, terminating the group", static_cast<void *>(g.get()));
     group_destroy(g);
