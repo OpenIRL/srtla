@@ -29,7 +29,9 @@
 #include <sys/epoll.h>
 #include <errno.h>
 
+extern "C" {
 #include "common.h"
+}
 
 #define MAX_CONNS_PER_GROUP 8
 #define MAX_GROUPS          200
@@ -169,8 +171,8 @@ conn_group_t *group_create(char *sender_id, time_t ts) {
   } while(group_find_by_id(id) != NULL);
 
   // Allocate the new group
-  conn_group_t *g = malloc(sizeof(conn_group_t));
-  if (g == NULL) {
+  conn_group_t *g = static_cast<conn_group_t *>(malloc(sizeof(conn_group_t)));
+  if (!g) {
     err("malloc() failed\n");
     return NULL;
   }
@@ -231,6 +233,12 @@ int group_count_conns(conn_group_t *g) {
 }
 
 int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
+  conn_group_t *g = NULL;
+  conn_t *c;
+  int ret;
+  uint16_t header;
+  char *id;
+
   if (group_count >= MAX_GROUPS) {
     err("%s:%d: group count is %d, rejecting group registration\n",
         print_addr(addr), port_no(addr), group_count);
@@ -238,15 +246,15 @@ int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   }
 
   // If this remote address is already registered, abort
-  conn_group_t *g = NULL;
-  conn_t *c;
-  int ret = group_find_by_addr(addr, &g, &c);
-  if (ret != -1) goto err;
+  ret = group_find_by_addr(addr, &g, &c);
+  if (ret != -1)
+    goto err;
 
   // Allocate the group
-  char *id = in_buf + 2;
+  id = in_buf + 2;
   g = group_create(id, ts);
-  if (g == NULL) goto err;
+  if (g == NULL)
+    goto err;
 
   /* Record the address used to register the group
      It won't be allowed to register another group while this one is active */
@@ -254,13 +262,14 @@ int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
 
   // Build a REG2 packet
   char out_buf[SRTLA_TYPE_REG2_LEN];
-  uint16_t header = htobe16(SRTLA_TYPE_REG2);
+  header = htobe16(SRTLA_TYPE_REG2);
   memcpy(out_buf, &header, sizeof(header));
   memcpy(out_buf + sizeof(header), g->id, SRTLA_ID_LEN);
 
   // Send the REG2 packet
   ret = sendto(srtla_sock, &out_buf, sizeof(out_buf), 0, addr, addr_len);
-  if (ret != sizeof(out_buf)) goto err_destroy;
+  if (ret != sizeof(out_buf))
+    goto err_destroy;
 
   info("%s:%d: group %p registered\n", print_addr(addr), port_no(addr), g);
 
@@ -283,6 +292,8 @@ err:
 int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   conn_group_t *g, *tmp;
   conn_t *c;
+  int ret;
+  uint16_t header;
 
   char *id = in_buf + 2;
   g = group_find_by_id(id);
@@ -294,7 +305,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
 
   /* If the connection is already registered, we'll allow it to register
      again to the same group, but not to a new one */
-  int ret = group_find_by_addr(addr, &tmp, &c);
+  ret = group_find_by_addr(addr, &tmp, &c);
   if (ret != -1 && tmp != g) goto err;
 
   /* If the connection is already registered to the group, we can
@@ -303,8 +314,8 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
     int conn_count = group_count_conns(g);
     if (conn_count >= MAX_CONNS_PER_GROUP) goto err;
 
-    c = malloc(sizeof(conn_t));
-    if (c == NULL) {
+    c = static_cast<conn_t *>(malloc(sizeof(conn_t)));
+    if (!c) {
       err("malloc() failed\n");
       goto err;
     }
@@ -315,7 +326,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
     g->conns = c;
   }
 
-  uint16_t header = htobe16(SRTLA_TYPE_REG3);
+  header = htobe16(SRTLA_TYPE_REG3);
   ret = sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
   if (ret != sizeof(header)) goto err_destroy;
 
