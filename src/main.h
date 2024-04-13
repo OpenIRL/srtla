@@ -36,6 +36,8 @@ extern "C" {
 
 #define RECV_ACK_INT 10
 
+#define SRT_SOCKET_INFO_PREFIX "/tmp/srtla-group-"
+
 struct srtla_conn {
     struct sockaddr addr = {};
     time_t last_rcvd;
@@ -47,12 +49,14 @@ typedef std::shared_ptr<srtla_conn> srtla_conn_ptr;
 struct srtla_conn_group {
     std::array<char, SRTLA_ID_LEN> id;
     std::vector<srtla_conn_ptr> conns;
-    time_t created_at;
+    time_t created_at = 0;
     int srt_sock = -1;
-    struct sockaddr last_addr;
+    struct sockaddr last_addr = {};
 
     srtla_conn_group(char *client_id, time_t ts);
     ~srtla_conn_group();
+
+    std::vector<struct sockaddr> get_client_addresses();
 };
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
 

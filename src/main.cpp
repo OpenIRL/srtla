@@ -95,6 +95,25 @@ inline std::vector<char> get_random_bytes(size_t size)
   return ret;
 }
 
+uint16_t get_sock_local_port(int fd)
+{
+  struct sockaddr_in local_addr = {};
+  socklen_t local_addr_len = sizeof(local_addr);
+  getsockname(fd, (struct sockaddr *)&local_addr, &local_addr_len);
+  return ntohs(local_addr.sin_port);
+}
+
+inline void write_socket_info_file(int srt_fd, std::vector<struct sockaddr> &client_addresses)
+{
+  uint16_t local_port = get_sock_local_port(srt_fd);
+  std::string file_name = std::string(SRT_SOCKET_INFO_PREFIX) + std::to_string(local_port);
+
+  std::ofstream f(file_name);
+  for (auto &addr : client_addresses)
+    f << print_addr(&addr) << std::endl;
+  f.close();
+}
+
 inline void srtla_send_reg_err(struct sockaddr *addr)
 {
   uint16_t header = htobe16(SRTLA_TYPE_REG_ERR);
@@ -150,6 +169,14 @@ srtla_conn_group::~srtla_conn_group()
     epoll_rem(srt_sock);
     close(srt_sock);
   }
+}
+
+std::vector<struct sockaddr> srtla_conn_group::get_client_addresses()
+{
+  std::vector<struct sockaddr> ret;
+  for (auto conn : conns)
+    ret.emplace_back(conn->addr);
+  return ret;
 }
 
 int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
@@ -255,10 +282,16 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   if (!already_registered)
     group->conns.push_back(conn);
 
+  if (group->srt_sock != -1) {
+    auto client_addresses = group->get_client_addresses();
+    write_socket_info_file(group->srt_sock, client_addresses);
+    spdlog::debug("{}:{}: (Group {}) Wrote fresh srtla socket info file", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+  }
+
   // If it all worked, mark this peer as the most recently active one
   group->last_addr = *addr;
 
-  spdlog::info("{}:{} (group {}): Connection registration", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+  spdlog::info("{}:{} (Group {}): Connection registration", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
 }
 
@@ -388,12 +421,19 @@ void handle_srtla_data(time_t ts) {
       return;
     }
 
+    uint16_t local_port = get_sock_local_port(sock);
+    spdlog::info("Group {}: Created SRT socket. Local Port: {}", static_cast<void *>(g.get()), local_port);
+
     ret = epoll_add(sock, EPOLLIN, g.get());
     if (ret != 0) {
       spdlog::error("Group {}: failed to add the SRT socket to the epoll", static_cast<void *>(g.get()));
       remove_group(g);
       return;
     }
+
+    // Write file containing association between local port and client IPs
+    std::vector<struct sockaddr> srtla_addresses{srtla_addr};
+    write_socket_info_file(sock, srtla_addresses);
   }
 
   int ret = send(g->srt_sock, &buf, n, 0);
