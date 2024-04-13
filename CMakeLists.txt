@@ -9,7 +9,8 @@ find_package(nlohmann_json 3 REQUIRED)
 add_executable(irltk_srtla_rec
     src/common.c
     src/common.h
-    src/main.cpp)
+    src/main.cpp
+    src/main.h)
 
 target_link_libraries(irltk_srtla_rec PRIVATE
     nlohmann_json::nlohmann_json)

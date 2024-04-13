@@ -29,47 +29,22 @@
 #include <sys/epoll.h>
 #include <errno.h>
 
+#include <vector>
+#include <algorithm>
+
 extern "C" {
 #include "common.h"
 }
 
-#define MAX_CONNS_PER_GROUP 8
-#define MAX_GROUPS          200
-
-#define CLEANUP_PERIOD 3
-#define GROUP_TIMEOUT  10
-#define CONN_TIMEOUT   10
-
-#define RECV_ACK_INT 10
-typedef struct srtla_conn {
-  struct srtla_conn *next;
-  struct sockaddr addr;
-  time_t last_rcvd;
-  int recv_idx;
-  uint32_t recv_log[RECV_ACK_INT];
-} conn_t;
-
-typedef struct srtla_conn_group {
-  struct srtla_conn_group *next;
-  conn_t *conns;
-  time_t created_at;
-  int srt_sock;
-  struct sockaddr last_addr;
-  char id[SRTLA_ID_LEN];
-} conn_group_t;
-
-typedef struct {
-  uint32_t type;
-  uint32_t acks[RECV_ACK_INT];
-} srtla_ack_pkt;
+#include "main.h"
 
 
 int srtla_sock;
 struct sockaddr srt_addr;
 const socklen_t addr_len = sizeof(struct sockaddr);
 
-conn_group_t *groups = NULL;
-int group_count = 0;
+
+std::vector<srtla_conn_group_ptr> conn_groups;
 
 FILE *urandom;
 
@@ -132,27 +107,26 @@ int get_random(void *dest, size_t len) {
 Connection and group management functions
 
 */
-conn_group_t *group_find_by_id(char *id) {
-  for (conn_group_t* g = groups; g != NULL; g = g->next) {
-    if (const_time_cmp(g->id, id, SRTLA_ID_LEN) == 0) {
-      return g;
-    }
+srtla_conn_group_ptr group_find_by_id(char *id) {
+  for (auto &group : conn_groups) {
+    if (const_time_cmp(group->id, id, SRTLA_ID_LEN) == 0)
+      return group;
   }
 
-  return NULL;
+  return nullptr;
 }
 
-int group_find_by_addr(struct sockaddr *addr, conn_group_t **rg, conn_t **rc) {
-  for (conn_group_t* g = groups; g != NULL; g = g->next) {
-    for (conn_t *c = g->conns; c != NULL; c = c->next) {
+int group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_conn **rc) {
+  for (auto &group : conn_groups) {
+    for (srtla_conn *c = group->conns; c != NULL; c = c->next) {
       if (const_time_cmp(&(c->addr), addr, addr_len) == 0) {
-        *rg = g;
+        rg = group;
         *rc = c;
         return 1;
       }
     }
-    if (const_time_cmp(&g->last_addr, addr, addr_len) == 0) {
-      *rg = g;
+    if (const_time_cmp(&group->last_addr, addr, addr_len) == 0) {
+      rg = group;
       *rc = NULL;
       return 0;
     }
@@ -161,38 +135,34 @@ int group_find_by_addr(struct sockaddr *addr, conn_group_t **rg, conn_t **rc) {
   return -1;
 }
 
-conn_group_t *group_create(char *sender_id, time_t ts) {
+srtla_conn_group_ptr group_create(char *sender_id, time_t ts) {
   // Make sure the ID isn't a duplicate - very unlikely
   char id[SRTLA_ID_LEN];
   memcpy(&id, sender_id, SRTLA_ID_LEN/2);
   do {
     int ret = get_random(&id[SRTLA_ID_LEN/2], SRTLA_ID_LEN/2);
-    if (ret != 0) return NULL;
-  } while(group_find_by_id(id) != NULL);
+    if (ret != 0)
+      return nullptr;
+  } while(group_find_by_id(id));
 
   // Allocate the new group
-  conn_group_t *g = static_cast<conn_group_t *>(malloc(sizeof(conn_group_t)));
-  if (!g) {
-    err("malloc() failed\n");
-    return NULL;
-  }
+  auto g = std::make_shared<srtla_conn_group>();
 
   // And initialize it with the ID we've built above
   memcpy(&g->id, id, SRTLA_ID_LEN);
   g->conns = NULL;
   g->srt_sock = -1;
   g->created_at = ts;
-  g->next = groups;
-  groups = g;
 
   return g;
 }
 
-int group_destroy(conn_group_t *g, conn_group_t **prev_link) {
-  if (g == NULL) return -1;
+int group_destroy(srtla_conn_group_ptr g) {
+  if (!g)
+    return -1;
 
-  for (conn_t *c = g->conns; c != NULL;) {
-    conn_t *next = c->next;
+  for (srtla_conn *c = g->conns; c != NULL;) {
+    srtla_conn *next = c->next;
     free(c);
     c = next;
   }
@@ -202,58 +172,43 @@ int group_destroy(conn_group_t *g, conn_group_t **prev_link) {
     close(g->srt_sock);
   }
 
-  if (prev_link != NULL) {
-    // The caller passed us a pointer to the linked list pointer to this group
-    *prev_link = g->next;
-  } else {
-    // Search and unlink
-    for (conn_group_t **it = &groups; (*it) != NULL; it = &((*it)->next)) {
-      if (*it == g) {
-        *it = g->next;
-        break;
-      }
-    } // for
-  } // prev_link == NULL
-
-  free(g);
-
-  /* Must ensure statements updating group_count on the creation and
-     destruction code paths match up so we don't drift */
-  group_count--;
+  conn_groups.erase(std::remove(conn_groups.begin(), conn_groups.end(), g), conn_groups.end());
 
   return 0;
 }
 
-int group_count_conns(conn_group_t *g) {
+int group_count_conns(srtla_conn_group_ptr g) {
+  if (!g)
+    return 0;
+
   int count = 0;
-  for (conn_t *c = g->conns; c != NULL; c = c->next) {
+  for (srtla_conn *c = g->conns; c != NULL; c = c->next)
     count++;
-  }
   return count;
 }
 
 int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
-  conn_group_t *g = NULL;
-  conn_t *c;
+  srtla_conn_group_ptr g;
+  srtla_conn *c;
   int ret;
   uint16_t header;
   char *id;
 
-  if (group_count >= MAX_GROUPS) {
-    err("%s:%d: group count is %d, rejecting group registration\n",
-        print_addr(addr), port_no(addr), group_count);
+  if (conn_groups.size() >= MAX_GROUPS) {
+    err("%s:%d: group count is %ld, rejecting group registration\n",
+        print_addr(addr), port_no(addr), conn_groups.size());
     goto err;
   }
 
   // If this remote address is already registered, abort
-  ret = group_find_by_addr(addr, &g, &c);
+  ret = group_find_by_addr(addr, g, &c);
   if (ret != -1)
     goto err;
 
   // Allocate the group
   id = in_buf + 2;
   g = group_create(id, ts);
-  if (g == NULL)
+  if (!g)
     goto err;
 
   /* Record the address used to register the group
@@ -269,18 +224,13 @@ int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   // Send the REG2 packet
   ret = sendto(srtla_sock, &out_buf, sizeof(out_buf), 0, addr, addr_len);
   if (ret != sizeof(out_buf))
-    goto err_destroy;
+    goto err;
 
-  info("%s:%d: group %p registered\n", print_addr(addr), port_no(addr), g);
+  info("%s:%d: group %p registered\n", print_addr(addr), port_no(addr), g.get());
 
-  // Only count the group after everything else succeeded
-  group_count++;
+  conn_groups.push_back(g);
 
   return 0;
-
-err_destroy:
-  groups = g->next;
-  free(g);
 
 err:
   err("%s:%d: group registration failed\n", print_addr(addr), port_no(addr));
@@ -290,14 +240,14 @@ err:
 }
 
 int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
-  conn_group_t *g, *tmp;
-  conn_t *c;
+  srtla_conn_group_ptr g, tmp;
+  srtla_conn *c;
   int ret;
   uint16_t header;
 
   char *id = in_buf + 2;
   g = group_find_by_id(id);
-  if (g == NULL) {
+  if (!g) {
     uint16_t header = htobe16(SRTLA_TYPE_REG_NGP);
     sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
     goto err_early;
@@ -305,16 +255,18 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
 
   /* If the connection is already registered, we'll allow it to register
      again to the same group, but not to a new one */
-  ret = group_find_by_addr(addr, &tmp, &c);
-  if (ret != -1 && tmp != g) goto err;
+  ret = group_find_by_addr(addr, tmp, &c);
+  if (ret != -1 && tmp != g)
+    goto err;
 
   /* If the connection is already registered to the group, we can
      just skip ahead to sending the SRTLA_REG3 */
   if (ret != 1) {
     int conn_count = group_count_conns(g);
-    if (conn_count >= MAX_CONNS_PER_GROUP) goto err;
+    if (conn_count >= MAX_CONNS_PER_GROUP)
+      goto err;
 
-    c = static_cast<conn_t *>(malloc(sizeof(conn_t)));
+    c = static_cast<srtla_conn *>(malloc(sizeof(srtla_conn)));
     if (!c) {
       err("malloc() failed\n");
       goto err;
@@ -330,7 +282,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   ret = sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
   if (ret != sizeof(header)) goto err_destroy;
 
-  info("%s:%d (group %p): connection registration\n", print_addr(addr), port_no(addr), g);
+  info("%s:%d (group %p): connection registration\n", print_addr(addr), port_no(addr), g.get());
 
   // If it all worked, mark this peer as the most recently active one
   g->last_addr = *addr;
@@ -347,7 +299,7 @@ err:
 
 err_early:
   err("%s:%d: connection registration for group %p failed\n",
-      print_addr(addr), port_no(addr), g);
+      print_addr(addr), port_no(addr), g.get());
   return -1;
 }
 
@@ -361,26 +313,27 @@ Resource limits:
 
 */
 
-void handle_srt_data(conn_group_t *g) {
+void handle_srt_data(srtla_conn_group_ptr g) {
   char buf[MTU];
 
-  if (g == NULL) return;
+  if (!g)
+    return;
 
   int n = recv(g->srt_sock, &buf, MTU, 0);
   if (n < SRT_MIN_LEN) {
-    err("Group %p: failed to read the SRT sock, terminating the group\n", g);
-    group_destroy(g, NULL);
+    err("Group %p: failed to read the SRT sock, terminating the group\n", g.get());
+    group_destroy(g);
     return;
   }
 
   // ACK
   if (is_srt_ack(buf, n)) {
     // Broadcast SRT ACKs over all connections for timely delivery
-    for (conn_t *c = g->conns; c != NULL; c = c->next) {
+    for (srtla_conn *c = g->conns; c != NULL; c = c->next) {
       int ret = sendto(srtla_sock, &buf, n, 0, &c->addr, addr_len);
       if (ret != n) {
         err("%s:%d (group %p): failed to send the SRT ack\n",
-            print_addr(&c->addr), port_no(&c->addr), g);
+            print_addr(&c->addr), port_no(&c->addr), g.get());
       }
     }
   } else {
@@ -388,12 +341,12 @@ void handle_srt_data(conn_group_t *g) {
     int ret = sendto(srtla_sock, &buf, n, 0, &g->last_addr, addr_len);
     if (ret != n) {
       err("%s:%d (group %p): failed to send the SRT packet\n",
-          print_addr(&g->last_addr), port_no(&g->last_addr), g);
+          print_addr(&g->last_addr), port_no(&g->last_addr), g.get());
     }
   }
 }
 
-void register_packet(conn_group_t *g, conn_t *c, int32_t sn) {
+void register_packet(srtla_conn_group_ptr g, srtla_conn *c, int32_t sn) {
   // store the sequence numbers in BE, as they're transmitted over the network
   c->recv_log[c->recv_idx++] = htobe32(sn);
 
@@ -405,7 +358,7 @@ void register_packet(conn_group_t *g, conn_t *c, int32_t sn) {
     int ret = sendto(srtla_sock, &ack, sizeof(ack), 0, &c->addr, addr_len);
     if (ret != sizeof(ack)) {
       err("%s:%d (group %p): failed to send the srtla ack\n",
-          print_addr(&c->addr), port_no(&c->addr), g);
+          print_addr(&c->addr), port_no(&c->addr), g.get());
     }
 
     c->recv_idx = 0;
@@ -437,9 +390,9 @@ void handle_srtla_data(time_t ts) {
   }
 
   // Check that the peer is a member of a connection group, discard otherwise
-  conn_t *c;
-  conn_group_t *g;
-  ret = group_find_by_addr(&srtla_addr, &g, &c);
+  srtla_conn *c;
+  srtla_conn_group_ptr g;
+  ret = group_find_by_addr(&srtla_addr, g, &c);
   if (ret != 1) return;
 
   // Update the connection's use timestamp
@@ -450,7 +403,7 @@ void handle_srtla_data(time_t ts) {
     int ret = sendto(srtla_sock, &buf, n, 0, &srtla_addr, addr_len);
     if (ret != n) {
       err("%s:%d (group %p): failed to send the srtla keepalive\n",
-          print_addr(&srtla_addr), port_no(&srtla_addr), g);
+          print_addr(&srtla_addr), port_no(&srtla_addr), g.get());
     }
     return;
   }
@@ -471,31 +424,31 @@ void handle_srtla_data(time_t ts) {
   if (g->srt_sock < 0) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
-      err("Group %p: failed to create an SRT socket\n", g);
-      group_destroy(g, NULL);
+      err("Group %p: failed to create an SRT socket\n", g.get());
+      group_destroy(g);
       return;
     }
     g->srt_sock = sock;
 
     int ret = connect(sock, &srt_addr, addr_len);
     if (ret != 0) {
-      err("Group %p: failed to connect() the SRT socket\n", g);
-      group_destroy(g, NULL);
+      err("Group %p: failed to connect() the SRT socket\n", g.get());
+      group_destroy(g);
       return;
     }
 
-    ret = epoll_add(sock, EPOLLIN, g);
+    ret = epoll_add(sock, EPOLLIN, g.get());
     if (ret != 0) {
-      err("Group %p: failed to add the SRT socket to the epoll\n", g);
-      group_destroy(g, NULL);
+      err("Group %p: failed to add the SRT socket to the epoll\n", g.get());
+      group_destroy(g);
       return;
     }
   }
 
   ret = send(g->srt_sock, &buf, n, 0);
   if (ret != n) {
-    err("Group %p: failed to forward the srtla packet, terminating the group\n", g);
-    group_destroy(g, NULL);
+    err("Group %p: failed to forward the srtla packet, terminating the group\n", g.get());
+    group_destroy(g);
   }
 }
 
@@ -510,30 +463,33 @@ void handle_srtla_data(time_t ts) {
 */
 void connection_cleanup(time_t ts) {
   static time_t last_ran = 0;
-  if ((last_ran + CLEANUP_PERIOD) > ts) return;
+  if ((last_ran + CLEANUP_PERIOD) > ts)
+    return;
   last_ran = ts;
 
-  if (groups == NULL) return;
+  if (!conn_groups.size())
+    return;
 
-  int total_groups = 0, total_conns = 0, removed_groups = 0, removed_conns = 0;
+  int total_groups = conn_groups.size();
+  int total_conns = 0;
+  int removed_groups = 0;
+  int removed_conns = 0;
 
   debug("Started a cleanup run\n");
 
-  conn_group_t *next_g = NULL;
-  conn_group_t **prev_g = &groups;
-  for (conn_group_t *g = groups; g != NULL; g = next_g) {
-    total_groups++;
-    next_g = g->next;
+  std::vector<srtla_conn_group_ptr> groups_to_remove;
 
-    conn_t *next_c = NULL;
-    conn_t **prev_c = &g->conns;
-    for (conn_t *c = g->conns; c != NULL; c = next_c) {
+  for (auto &group : conn_groups) {
+    srtla_conn *next_c = nullptr;
+    srtla_conn **prev_c = &group->conns;
+
+    for (srtla_conn *c = group->conns; c != nullptr; c = next_c) {
       total_conns++;
       next_c = c->next;
       if ((c->last_rcvd + CONN_TIMEOUT) < ts) {
         removed_conns++;
         info("%s:%d (group %p): connection removed (timed out)\n",
-             print_addr(&c->addr), port_no(&c->addr), g);
+             print_addr(&c->addr), port_no(&c->addr), group.get());
         *prev_c = next_c;
         free(c);
         continue;
@@ -541,13 +497,16 @@ void connection_cleanup(time_t ts) {
       prev_c = &c->next;
     }
 
-    if (g->conns == NULL && (g->created_at + GROUP_TIMEOUT) < ts) {
-      removed_groups++;
-      info("Group %p: removed (no connections)\n", g);
-      group_destroy(g, prev_g);
-      continue;
-    }
-    prev_g = &g->next;
+    if (!group->conns && (group->created_at + GROUP_TIMEOUT) < ts)
+      groups_to_remove.push_back(group);
+  }
+
+  removed_groups = groups_to_remove.size();
+
+  for (auto &group : groups_to_remove) {
+    conn_groups.erase(std::remove(conn_groups.begin(), conn_groups.end(), group), conn_groups.end());
+    group_destroy(group);
+    info("Group %p: removed (no connections)\n", group.get());
   }
 
   debug("Clean up run ended. Counted %d groups and %d connections. "
@@ -702,7 +661,7 @@ int main(int argc, char **argv) {
 
   info("srtla_rec is now running\n");
 
-  while(1) {
+  while(true) {
     #define MAX_EPOLL_EVENTS 10
     struct epoll_event events[MAX_EPOLL_EVENTS];
     int eventcnt = epoll_wait(socket_epoll, events, MAX_EPOLL_EVENTS, 1000);
@@ -713,22 +672,24 @@ int main(int argc, char **argv) {
       err("Failed to get the timestamp\n");
     }
 
-    int group_cnt;
+    size_t group_cnt;
     for (int i = 0; i < eventcnt; i++) {
-      group_cnt = group_count;
+      group_cnt = conn_groups.size();
       if (events[i].data.ptr == NULL) {
         handle_srtla_data(ts);
       } else {
-        handle_srt_data((conn_group_t*)events[i].data.ptr);
+        auto g = static_cast<srtla_conn_group *>(events[i].data.ptr);
+        handle_srt_data(group_find_by_id(g->id));
       }
 
       /* If we've removed a group due to a socket error, then we might have
          pending events already waiting for us in events[], and now pointing
          to freed() memory. Get an updated list from epoll_wait() */
-      if (group_count < group_cnt) break;
+      if (conn_groups.size() < group_cnt)
+        break;
     } // for
 
     connection_cleanup(ts);
-  } // while(1);
+  }
 }
 
