@@ -40,9 +40,11 @@ extern "C" {
 
 struct srtla_conn {
     struct sockaddr addr = {};
-    time_t last_rcvd;
+    time_t last_rcvd = 0;
     int recv_idx = 0;
-    uint32_t recv_log[RECV_ACK_INT];
+    std::array<uint32_t, RECV_ACK_INT> recv_log;
+
+    srtla_conn(struct sockaddr &_addr, time_t ts);
 };
 typedef std::shared_ptr<srtla_conn> srtla_conn_ptr;
 

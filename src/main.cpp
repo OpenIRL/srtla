@@ -150,9 +150,18 @@ void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_c
   rc = nullptr;
 }
 
+srtla_conn::srtla_conn(struct sockaddr &_addr, time_t ts) :
+  addr(_addr),
+  last_rcvd(ts)
+{
+  recv_log.fill(0);
+}
+
 srtla_conn_group::srtla_conn_group(char *client_id, time_t ts) :
   created_at(ts)
 {
+  id.fill(0);
+
   // Copy client ID to first half of id buffer
   std::memcpy(id.begin(), client_id, SRTLA_ID_LEN / 2);
 
@@ -264,11 +273,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
       return -1;
     }
 
-    conn = std::make_shared<srtla_conn>();
-    conn->addr = *addr;
-    conn->recv_idx = 0;
-    conn->last_rcvd = ts;
-
+    conn = std::make_shared<srtla_conn>(*addr, ts);
     already_registered = false;
   }
 
@@ -297,10 +302,6 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
 
 /*
 The main network event handlers
-
-Resource limits:
-  * connections per group MAX_CONNS_PER_GROUP
-  * total groups          MAX_GROUPS
 */
 void handle_srt_data(srtla_conn_group_ptr g) {
   char buf[MTU];
@@ -332,21 +333,21 @@ void handle_srt_data(srtla_conn_group_ptr g) {
   }
 }
 
-void register_packet(srtla_conn_group_ptr g, srtla_conn_ptr c, int32_t sn) {
+void register_packet(srtla_conn_group_ptr group, srtla_conn_ptr conn, int32_t sn) {
   // store the sequence numbers in BE, as they're transmitted over the network
-  c->recv_log[c->recv_idx++] = htobe32(sn);
+  conn->recv_log[conn->recv_idx++] = htobe32(sn);
 
-  if (c->recv_idx == RECV_ACK_INT) {
+  if (conn->recv_idx == RECV_ACK_INT) {
     srtla_ack_pkt ack;
     ack.type = htobe32(SRTLA_TYPE_ACK << 16);
-    memcpy(&ack.acks, &c->recv_log, sizeof(c->recv_log));
+    std::memcpy(&ack.acks, conn->recv_log.begin(), sizeof(uint32_t) * conn->recv_log.max_size());
 
-    int ret = sendto(srtla_sock, &ack, sizeof(ack), 0, &c->addr, addr_len);
+    int ret = sendto(srtla_sock, &ack, sizeof(ack), 0, &conn->addr, addr_len);
     if (ret != sizeof(ack)) {
-      spdlog::error("{}:{} (Group {}): failed to send the srtla ack", print_addr(&c->addr), port_no(&c->addr), static_cast<void *>(g.get()));
+      spdlog::error("{}:{} (Group {}): failed to send the srtla ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
     }
 
-    c->recv_idx = 0;
+    conn->recv_idx = 0;
   }
 }
 
@@ -580,12 +581,11 @@ int main(int argc, char **argv) {
     printf(VERSION "\n");
     exit(0);
   }
+
   if (argc != 4) {
     print_help();
     exit(0);
   }
-
-  struct sockaddr_in listen_addr;
 
   int srtla_port = parse_port(ARG_LISTEN_PORT);
   if (srtla_port < 0) {
@@ -607,9 +607,6 @@ int main(int argc, char **argv) {
   }
 
   // Set up the listener socket for incoming SRT connections
-  listen_addr.sin_family = AF_INET;
-  listen_addr.sin_addr.s_addr = INADDR_ANY;
-  listen_addr.sin_port = htons(srtla_port);
   srtla_sock = socket(AF_INET, SOCK_DGRAM, 0);
   if (srtla_sock < 0) {
     spdlog::critical("SRTLA socket creation failed");
@@ -624,6 +621,11 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
+  // TODO: IPv6 listener
+  struct sockaddr_in listen_addr = {};
+  listen_addr.sin_family = AF_INET;
+  listen_addr.sin_addr.s_addr = INADDR_ANY;
+  listen_addr.sin_port = htons(srtla_port);
   ret = bind(srtla_sock, (const struct sockaddr *)&listen_addr, addr_len);
   if (ret < 0) {
     spdlog::critical("SRTLA socket bind failed");
