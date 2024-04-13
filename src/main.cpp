@@ -412,7 +412,7 @@ void handle_srtla_data(time_t ts) {
   Connections:
     * GC last_rcvd < (ts - CONN_TIMEOUT)
 */
-void connection_cleanup(time_t ts) {
+void cleanup_groups_connections(time_t ts) {
   static time_t last_ran = 0;
   if ((last_ran + CLEANUP_PERIOD) > ts)
     return;
@@ -421,50 +421,37 @@ void connection_cleanup(time_t ts) {
   if (!conn_groups.size())
     return;
 
+  spdlog::debug("Starting a cleanup run...");
+
   int total_groups = conn_groups.size();
   int total_conns = 0;
   int removed_groups = 0;
   int removed_conns = 0;
 
-  spdlog::debug("Starting a cleanup run...");
+  for (std::vector<srtla_conn_group_ptr>::iterator git = conn_groups.begin(); git != conn_groups.end();) {
+    auto group = *git;
 
-  // TODO: Remove conns from conn_groups during single iterate
-  std::vector<srtla_conn_group_ptr> groups_to_remove;
-
-  for (auto &group : conn_groups) {
     total_conns += group->conns.size();
+    for (std::vector<srtla_conn_ptr>::iterator cit = group->conns.begin(); cit != group->conns.end();) {
+      auto conn = *cit;
 
-    // TODO: Remove conns from group->conns during single iterate
-    std::vector<srtla_conn_ptr> conns_to_remove;
-
-    // Put timed out conns into remove list
-    for (auto &conn : group->conns) {
-      if ((conn->last_rcvd + CONN_TIMEOUT) < ts)
-        conns_to_remove.push_back(conn);
+      if ((conn->last_rcvd + CONN_TIMEOUT) < ts) {
+        cit = group->conns.erase(cit);
+        removed_conns++;
+        spdlog::info("{}:{} (Group {}): Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+      } else {
+        cit++;
+      }
     }
 
-    // Remove conns in remove list from group
-    for (auto &conn : conns_to_remove) {
-      group->conns.erase(std::remove(group->conns.begin(), group->conns.end(), conn), group->conns.end());
-      spdlog::info("{}:{} (Group {}): Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+    if (!group->conns.size() && (group->created_at + GROUP_TIMEOUT) < ts) {
+      git = conn_groups.erase(git);
+      removed_groups++;
+      spdlog::info("Group {} removed (no connections)", static_cast<void *>(group.get()));
+    } else {
+      git++;
     }
-
-    // Update totals
-    removed_conns += conns_to_remove.size();
-
-    // If group has timed out, place into group remove list
-    if (!group->conns.size() && (group->created_at + GROUP_TIMEOUT) < ts)
-      groups_to_remove.push_back(group);
   }
-
-  // Remove groups in remove list from group list
-  for (auto &group : groups_to_remove) {
-    remove_group(group);
-    spdlog::info("Group {} removed (no connections)", static_cast<void *>(group.get()));
-  }
-
-  // Update totals again
-  removed_groups = groups_to_remove.size();
 
   spdlog::debug("Clean up run ended. Counted {} groups and {} connections. Removed {} groups and {} connections", total_groups, total_conns, removed_groups, removed_conns);
 }
@@ -638,7 +625,7 @@ int main(int argc, char **argv) {
         break;
     } // for
 
-    connection_cleanup(ts);
+    cleanup_groups_connections(ts);
   }
 }
 
