@@ -39,7 +39,7 @@ extern "C" {
 struct srtla_conn {
     struct sockaddr addr = {};
     time_t last_rcvd;
-    int recv_idx;
+    int recv_idx = 0;
     uint32_t recv_log[RECV_ACK_INT];
 };
 typedef std::shared_ptr<srtla_conn> srtla_conn_ptr;
@@ -50,6 +50,9 @@ struct srtla_conn_group {
     time_t created_at;
     int srt_sock = -1;
     struct sockaddr last_addr;
+
+    srtla_conn_group(char *client_id, time_t ts);
+    ~srtla_conn_group();
 };
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
 

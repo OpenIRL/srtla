@@ -65,7 +65,7 @@ int epoll_rem(int fd) {
 /*
 Misc helper functions
 */
-void print_help() {
+inline void print_help() {
   fprintf(stderr, "Syntax: srtla_rec [-v] SRTLA_LISTEN_PORT SRT_HOST SRT_PORT\n\n-v      Print the version and exit\n");
 }
 
@@ -82,7 +82,7 @@ int const_time_cmp(const void *a, const void *b, int len) {
   return diff ? -1 : 0;
 }
 
-std::vector<char> get_random_bytes(size_t size)
+inline std::vector<char> get_random_bytes(size_t size)
 {
   std::vector<char> ret;
   ret.resize(size);
@@ -131,40 +131,28 @@ void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_c
   rc = nullptr;
 }
 
-srtla_conn_group_ptr group_create(char *client_id, time_t ts) {
-  auto server_id = get_random_bytes(SRTLA_ID_LEN / 2); // Generate server ID
+srtla_conn_group::srtla_conn_group(char *client_id, time_t ts) :
+  created_at(ts)
+{
+  // Copy client ID to first half of id buffer
+  std::memcpy(id.begin(), client_id, SRTLA_ID_LEN / 2);
 
-  std::array<char, SRTLA_ID_LEN> id;
-  std::memcpy(id.begin(), client_id, SRTLA_ID_LEN / 2); // Copy client ID to first half of id buffer
-  std::copy(server_id.begin(), server_id.end(), id.begin() + (SRTLA_ID_LEN / 2)); // Copy server ID to last half of id buffer
-
-  // Allocate the new group
-  auto g = std::make_shared<srtla_conn_group>();
-
-  // And initialize it with the ID we've built above
-  g->id = id;
-  g->created_at = ts;
-
-  return g;
+  // Generate server ID, then copy to last half of id buffer
+  auto server_id = get_random_bytes(SRTLA_ID_LEN / 2); 
+  std::copy(server_id.begin(), server_id.end(), id.begin() + (SRTLA_ID_LEN / 2));
 }
 
-int group_destroy(srtla_conn_group_ptr g) {
-  if (!g)
-    return -1;
+srtla_conn_group::~srtla_conn_group()
+{
+  conns.clear();
 
-  g->conns.clear();
-
-  if (g->srt_sock > 0) {
-    epoll_rem(g->srt_sock);
-    close(g->srt_sock);
+  if (srt_sock > 0) {
+    epoll_rem(srt_sock);
+    close(srt_sock);
   }
-
-  conn_groups.erase(std::remove(conn_groups.begin(), conn_groups.end(), g), conn_groups.end());
-
-  return 0;
 }
 
-int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
+int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
   if (conn_groups.size() >= MAX_GROUPS) {
     srtla_send_reg_err(addr);
     spdlog::error("{}:{}: Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
@@ -182,8 +170,8 @@ int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   }
 
   // Allocate the group
-  char *id = in_buf + 2;
-  group = group_create(id, ts);
+  char *client_id = in_buf + 2;
+  group = std::make_shared<srtla_conn_group>(client_id, ts);
 
   /* Record the address used to register the group
      It won't be allowed to register another group while this one is active */
@@ -206,6 +194,16 @@ int group_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
 
   spdlog::info("{}:{}: Group {} registered", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
+}
+
+void remove_group(srtla_conn_group_ptr group)
+{
+  if (!group)
+    return;
+
+  conn_groups.erase(std::remove(conn_groups.begin(), conn_groups.end(), group), conn_groups.end());
+
+  group.reset();
 }
 
 int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
@@ -280,7 +278,7 @@ void handle_srt_data(srtla_conn_group_ptr g) {
   int n = recv(g->srt_sock, &buf, MTU, 0);
   if (n < SRT_MIN_LEN) {
     spdlog::error("Group {}: failed to read the SRT sock, terminating the group", static_cast<void *>(g.get()));
-    group_destroy(g);
+    remove_group(g);
     return;
   }
 
@@ -333,7 +331,7 @@ void handle_srtla_data(time_t ts) {
 
   // Handle srtla registration packets
   if (is_srtla_reg1(buf, n)) {
-    group_reg(&srtla_addr, buf, ts);
+    register_group(&srtla_addr, buf, ts);
     return;
   }
 
@@ -378,7 +376,7 @@ void handle_srtla_data(time_t ts) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
       spdlog::error("Group {}: failed to create an SRT socket", static_cast<void *>(g.get()));
-      group_destroy(g);
+      remove_group(g);
       return;
     }
     g->srt_sock = sock;
@@ -386,14 +384,14 @@ void handle_srtla_data(time_t ts) {
     int ret = connect(sock, &srt_addr, addr_len);
     if (ret != 0) {
       spdlog::error("Group {}: failed to connect() the SRT socket", static_cast<void *>(g.get()));
-      group_destroy(g);
+      remove_group(g);
       return;
     }
 
     ret = epoll_add(sock, EPOLLIN, g.get());
     if (ret != 0) {
       spdlog::error("Group {}: failed to add the SRT socket to the epoll", static_cast<void *>(g.get()));
-      group_destroy(g);
+      remove_group(g);
       return;
     }
   }
@@ -401,7 +399,7 @@ void handle_srtla_data(time_t ts) {
   int ret = send(g->srt_sock, &buf, n, 0);
   if (ret != n) {
     spdlog::error("Group {}: failed to forward the srtla packet, terminating the group", static_cast<void *>(g.get()));
-    group_destroy(g);
+    remove_group(g);
   }
 }
 
@@ -461,8 +459,7 @@ void connection_cleanup(time_t ts) {
 
   // Remove groups in remove list from group list
   for (auto &group : groups_to_remove) {
-    conn_groups.erase(std::remove(conn_groups.begin(), conn_groups.end(), group), conn_groups.end());
-    group_destroy(group);
+    remove_group(group);
     spdlog::info("Group {} removed (no connections)", static_cast<void *>(group.get()));
   }
 
