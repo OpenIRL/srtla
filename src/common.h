@@ -61,34 +61,6 @@ typedef struct __attribute__((__packed__)) {
   char     peer_ip[16];
 } srt_handshake_t;
 
-#define LOG_NONE    0   // prints only fatal errors
-#define LOG_ERR     1   // prints errors we can tolerate
-#define LOG_INFO    2   // prints informational messages
-#define LOG_DEBUG   3   // prints potentially verbose messages about the internal workings
-
-#define LOG_LEVEL LOG_INFO
-
-#if LOG_LEVEL >= LOG_DEBUG
-  #define debug(...) fprintf(stderr, __VA_ARGS__)
-#else
-  #define debug(...)
-#endif
-
-#if LOG_LEVEL >= LOG_INFO
-  #define info(...) fprintf(stderr, __VA_ARGS__)
-#else
-  #define info(...)
-#endif
-
-#if LOG_LEVEL >= LOG_ERR
-  #define err(...) fprintf(stderr, __VA_ARGS__)
-#else
-  #define err(...)
-#endif
-
-void print_help();
-void exit_help();
-
 int get_seconds(time_t *s);
 int get_ms(uint64_t *ms);
 

@@ -26,11 +26,6 @@
 
 #include "common.h"
 
-void exit_help() {
-  print_help();
-  exit(EXIT_FAILURE);
-}
-
 #define ADDR_BUF_SZ 50
 char _global_addr_buf[ADDR_BUF_SZ];
 const char *print_addr(struct sockaddr *addr) {

@@ -6,6 +6,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/Modules")
 # Find nlohmann JSON
 find_package(nlohmann_json 3 REQUIRED)
 
+find_package(spdlog REQUIRED)
+
 add_executable(irltk_srtla_rec
     src/common.c
     src/common.h
@@ -13,7 +15,8 @@ add_executable(irltk_srtla_rec
     src/main.h)
 
 target_link_libraries(irltk_srtla_rec PRIVATE
-    nlohmann_json::nlohmann_json)
+    nlohmann_json::nlohmann_json
+    spdlog::spdlog)
 
 target_compile_features(irltk_srtla_rec PRIVATE cxx_std_17)
 #target_compile_options(irltk_srtla_rec PRIVATE -Wall -Wextra)
