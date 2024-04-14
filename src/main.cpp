@@ -36,8 +36,9 @@
 #include <algorithm>
 #include <fstream>
 
-#include "main.h"
+#include <argparse/argparse.hpp>
 
+#include "main.h"
 
 int srtla_sock;
 struct sockaddr srt_addr;
@@ -48,6 +49,8 @@ std::vector<srtla_conn_group_ptr> conn_groups;
 /*
 Async I/O support
 */
+#define MAX_EPOLL_EVENTS 10
+
 int socket_epoll;
 
 int epoll_add(int fd, uint32_t events, void *priv_data) {
@@ -65,10 +68,6 @@ int epoll_rem(int fd) {
 /*
 Misc helper functions
 */
-inline void print_help() {
-  fprintf(stderr, "Syntax: srtla_rec [-v] SRTLA_LISTEN_PORT SRT_HOST SRT_PORT\n\n-v      Print the version and exit\n");
-}
-
 int const_time_cmp(const void *a, const void *b, int len) {
   char diff = 0;
   char *ca = (char *)a;
@@ -101,17 +100,6 @@ uint16_t get_sock_local_port(int fd)
   socklen_t local_addr_len = sizeof(local_addr);
   getsockname(fd, (struct sockaddr *)&local_addr, &local_addr_len);
   return ntohs(local_addr.sin_port);
-}
-
-inline void write_socket_info_file(int srt_fd, std::vector<struct sockaddr> &client_addresses)
-{
-  uint16_t local_port = get_sock_local_port(srt_fd);
-  std::string file_name = std::string(SRT_SOCKET_INFO_PREFIX) + std::to_string(local_port);
-
-  std::ofstream f(file_name);
-  for (auto &addr : client_addresses)
-    f << print_addr(&addr) << std::endl;
-  f.close();
 }
 
 inline void srtla_send_reg_err(struct sockaddr *addr)
@@ -175,6 +163,7 @@ srtla_conn_group::~srtla_conn_group()
   conns.clear();
 
   if (srt_sock > 0) {
+    remove_socket_info_file();
     epoll_rem(srt_sock);
     close(srt_sock);
   }
@@ -188,10 +177,39 @@ std::vector<struct sockaddr> srtla_conn_group::get_client_addresses()
   return ret;
 }
 
+void srtla_conn_group::write_socket_info_file()
+{
+  if (srt_sock == -1)
+    return;
+
+  uint16_t local_port = get_sock_local_port(srt_sock);
+  std::string file_name = std::string(SRT_SOCKET_INFO_PREFIX) + std::to_string(local_port);
+
+  auto client_addresses = get_client_addresses();
+
+  std::ofstream f(file_name);
+  for (auto &addr : client_addresses)
+    f << print_addr(&addr) << std::endl;
+  f.close();
+
+  spdlog::debug("[Group: {}] Wrote SRTLA socket info file", static_cast<void *>(this));
+}
+
+void srtla_conn_group::remove_socket_info_file()
+{
+  if (srt_sock == -1)
+    return;
+
+  uint16_t local_port = get_sock_local_port(srt_sock);
+  std::string file_name = std::string(SRT_SOCKET_INFO_PREFIX) + std::to_string(local_port);
+
+  std::remove(file_name.c_str());
+}
+
 int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
   if (conn_groups.size() >= MAX_GROUPS) {
     srtla_send_reg_err(addr);
-    spdlog::error("{}:{}: Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
+    spdlog::error("[{}:{}] Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
     return -1;
   }
 
@@ -201,7 +219,7 @@ int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
   group_find_by_addr(addr, group, conn);
   if (group) {
     srtla_send_reg_err(addr);
-    spdlog::error("{}:{}: Group registration failed: Remote address already registered to group", print_addr(addr), port_no(addr));
+    spdlog::error("[{}:{}] Group registration failed: Remote address already registered to group", print_addr(addr), port_no(addr));
     return -1;
   }
 
@@ -222,13 +240,13 @@ int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
   // Send the REG2 packet
   int ret = sendto(srtla_sock, &out_buf, sizeof(out_buf), 0, addr, addr_len);
   if (ret != sizeof(out_buf)) {
-    spdlog::error("{}:{}: Group registration failed: Send error", print_addr(addr), port_no(addr));
+    spdlog::error("[{}:{}] Group registration failed: Send error", print_addr(addr), port_no(addr));
     return -1;
   }
 
   conn_groups.push_back(group);
 
-  spdlog::info("{}:{}: Group {} registered", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+  spdlog::info("[{}:{}] Group {} registered", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
 }
 
@@ -248,7 +266,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   if (!group) {
     uint16_t header = htobe16(SRTLA_TYPE_REG_NGP);
     sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
-    spdlog::error("{}:{}: Connection registration failed: No group found", print_addr(addr), port_no(addr));
+    spdlog::error("[{}:{}] Connection registration failed: No group found", print_addr(addr), port_no(addr));
     return -1;
   }
 
@@ -259,7 +277,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   group_find_by_addr(addr, tmp, conn);
   if (tmp && tmp != group) {
     srtla_send_reg_err(addr);
-    spdlog::error("{}:{}: Connection registration for group {} failed: Provided group ID mismatch", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+    spdlog::error("[{}:{}] [Group: {}] Connection registration failed: Provided group ID mismatch", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
     return -1;
   }
 
@@ -269,7 +287,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   if (!conn) {
     if (group->conns.size() >= MAX_CONNS_PER_GROUP) {
       srtla_send_reg_err(addr);
-      spdlog::error("{}:{}: Connection registration for group {} failed: Max group conns reached", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+      spdlog::error("[{}:{}] [Group: {}] Connection registration failed: Max group conns reached", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
       return -1;
     }
 
@@ -280,23 +298,19 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   uint16_t header = htobe16(SRTLA_TYPE_REG3);
   int ret = sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
   if (ret != sizeof(header)) {
-    spdlog::error("{}:{}: Connection registration for group {} failed: Socket send error", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+    spdlog::error("[{}:{}] [Group: {}] Connection registration failed: Socket send error", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
     return -1;
   }
 
   if (!already_registered)
     group->conns.push_back(conn);
 
-  if (group->srt_sock != -1) {
-    auto client_addresses = group->get_client_addresses();
-    write_socket_info_file(group->srt_sock, client_addresses);
-    spdlog::debug("{}:{}: (Group {}) Wrote fresh srtla socket info file", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
-  }
+  group->write_socket_info_file();
 
   // If it all worked, mark this peer as the most recently active one
   group->last_addr = *addr;
 
-  spdlog::info("{}:{} (Group {}): Connection registration", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+  spdlog::info("[{}:{}] [Group: {}] Connection registration", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
 }
 
@@ -311,7 +325,7 @@ void handle_srt_data(srtla_conn_group_ptr g) {
 
   int n = recv(g->srt_sock, &buf, MTU, 0);
   if (n < SRT_MIN_LEN) {
-    spdlog::error("Group {}: failed to read the SRT sock, terminating the group", static_cast<void *>(g.get()));
+    spdlog::error("[Group: {}] Failed to read the SRT sock, terminating the group", static_cast<void *>(g.get()));
     remove_group(g);
     return;
   }
@@ -322,13 +336,13 @@ void handle_srt_data(srtla_conn_group_ptr g) {
     for (auto &conn : g->conns) {
       int ret = sendto(srtla_sock, &buf, n, 0, &conn->addr, addr_len);
       if (ret != n)
-        spdlog::error("{}:{} (Group {}): failed to send the SRT ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
+        spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
     }
   } else {
     // send other packets over the most recently used SRTLA connection
     int ret = sendto(srtla_sock, &buf, n, 0, &g->last_addr, addr_len);
     if (ret != n) {
-      spdlog::error("{}:{} (Group {}): failed to send the SRT packet", print_addr(&g->last_addr), port_no(&g->last_addr), static_cast<void *>(g.get()));
+      spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet", print_addr(&g->last_addr), port_no(&g->last_addr), static_cast<void *>(g.get()));
     }
   }
 }
@@ -344,7 +358,7 @@ void register_packet(srtla_conn_group_ptr group, srtla_conn_ptr conn, int32_t sn
 
     int ret = sendto(srtla_sock, &ack, sizeof(ack), 0, &conn->addr, addr_len);
     if (ret != sizeof(ack)) {
-      spdlog::error("{}:{} (Group {}): failed to send the srtla ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+      spdlog::error("[{}:{}] [Group: {}] Failed to send the SRTLA ACK", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
     }
 
     conn->recv_idx = 0;
@@ -359,7 +373,7 @@ void handle_srtla_data(time_t ts) {
   socklen_t len = addr_len;
   int n = recvfrom(srtla_sock, &buf, MTU, 0, &srtla_addr, &len);
   if (n < 0) {
-    spdlog::error("Failed to read a srtla packet");
+    spdlog::error("Failed to read an srtla packet");
     return;
   }
 
@@ -388,7 +402,7 @@ void handle_srtla_data(time_t ts) {
   if (is_srtla_keepalive(buf, n)) {
     int ret = sendto(srtla_sock, &buf, n, 0, &srtla_addr, addr_len);
     if (ret != n) {
-      spdlog::error("{}:{} (Group {}): failed to send the srtla keepalive", print_addr(&srtla_addr), port_no(&srtla_addr), static_cast<void *>(g.get()));
+      spdlog::error("[{}:{}] [Group: {}] Failed to send SRTLA Keepalive", print_addr(&srtla_addr), port_no(&srtla_addr), static_cast<void *>(g.get()));
     }
     return;
   }
@@ -409,7 +423,7 @@ void handle_srtla_data(time_t ts) {
   if (g->srt_sock < 0) {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
-      spdlog::error("Group {}: failed to create an SRT socket", static_cast<void *>(g.get()));
+      spdlog::error("[Group: {}] Failed to create an SRT socket", static_cast<void *>(g.get()));
       remove_group(g);
       return;
     }
@@ -417,29 +431,28 @@ void handle_srtla_data(time_t ts) {
 
     int ret = connect(sock, &srt_addr, addr_len);
     if (ret != 0) {
-      spdlog::error("Group {}: failed to connect() the SRT socket", static_cast<void *>(g.get()));
+      spdlog::error("[Group: {}] Failed to connect() to the SRT socket", static_cast<void *>(g.get()));
       remove_group(g);
       return;
     }
 
     uint16_t local_port = get_sock_local_port(sock);
-    spdlog::info("Group {}: Created SRT socket. Local Port: {}", static_cast<void *>(g.get()), local_port);
+    spdlog::info("[Group: {}] Created SRT socket. Local Port: {}", static_cast<void *>(g.get()), local_port);
 
     ret = epoll_add(sock, EPOLLIN, g.get());
     if (ret != 0) {
-      spdlog::error("Group {}: failed to add the SRT socket to the epoll", static_cast<void *>(g.get()));
+      spdlog::error("[Group: {}] Failed to add the SRT socket to the epoll", static_cast<void *>(g.get()));
       remove_group(g);
       return;
     }
 
     // Write file containing association between local port and client IPs
-    std::vector<struct sockaddr> srtla_addresses{srtla_addr};
-    write_socket_info_file(sock, srtla_addresses);
+    g->write_socket_info_file();
   }
 
   int ret = send(g->srt_sock, &buf, n, 0);
   if (ret != n) {
-    spdlog::error("Group {}: failed to forward the srtla packet, terminating the group", static_cast<void *>(g.get()));
+    spdlog::error("[Group: {}] Failed to forward SRTLA packet, terminating the group", static_cast<void *>(g.get()));
     remove_group(g);
   }
 }
@@ -472,14 +485,15 @@ void cleanup_groups_connections(time_t ts) {
   for (std::vector<srtla_conn_group_ptr>::iterator git = conn_groups.begin(); git != conn_groups.end();) {
     auto group = *git;
 
-    total_conns += group->conns.size();
+    size_t before_conns = group->conns.size();
+    total_conns += before_conns;
     for (std::vector<srtla_conn_ptr>::iterator cit = group->conns.begin(); cit != group->conns.end();) {
       auto conn = *cit;
 
       if ((conn->last_rcvd + CONN_TIMEOUT) < ts) {
         cit = group->conns.erase(cit);
         removed_conns++;
-        spdlog::info("{}:{} (Group {}): Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+        spdlog::info("[{}:{}] [Group: {}] Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
       } else {
         cit++;
       }
@@ -488,8 +502,10 @@ void cleanup_groups_connections(time_t ts) {
     if (!group->conns.size() && (group->created_at + GROUP_TIMEOUT) < ts) {
       git = conn_groups.erase(git);
       removed_groups++;
-      spdlog::info("Group {} removed (no connections)", static_cast<void *>(group.get()));
+      spdlog::info("[Group: {}] Group removed (no connections)", static_cast<void *>(group.get()));
     } else {
+      if (before_conns != group->conns.size())
+        group->write_socket_info_file();
       git++;
     }
   }
@@ -505,7 +521,7 @@ Returns: -1 when an error has been encountered
           0 when the address was resolved but SRT appears unreachable
           1 when the address was resolved and SRT appears reachable
 */
-int resolve_srt_addr(char *host, char *port) {
+int resolve_srt_addr(const char *host, const char *port) {
   // Let's set up an SRT handshake induction packet
   srt_handshake_t hs_packet = {0};
   hs_packet.header.type = htobe16(SRT_TYPE_HANDSHAKE);
@@ -520,7 +536,7 @@ int resolve_srt_addr(char *host, char *port) {
   struct addrinfo *srt_addrs;
   int ret = getaddrinfo(host, port, &hints, &srt_addrs);
   if (ret != 0) {
-    spdlog::error("Failed to resolve the address {}:{}", host, port);
+    spdlog::error("Failed to resolve the address: {}:{}", host, port);
     return -1;
   }
 
@@ -572,29 +588,31 @@ int resolve_srt_addr(char *host, char *port) {
   return found;
 }
 
-#define ARG_LISTEN_PORT (argv[1])
-#define ARG_SRT_HOST    (argv[2])
-#define ARG_SRT_PORT    (argv[3])
 int main(int argc, char **argv) {
-  // Command line argument parsing
-  if (argc == 2 && strcmp(argv[1], "-v") == 0) {
-    printf(VERSION "\n");
-    exit(0);
-  }
+  argparse::ArgumentParser args("irltk_srtla_rec", VERSION);
 
-  if (argc != 4) {
-    print_help();
-    exit(0);
-  }
+  args.add_argument("--srtla_port").help("Port to bind the SRTLA socket to").default_value((uint16_t)5000).scan<'d', uint16_t>();
+  args.add_argument("--srt_hostname").help("Hostname of the downstream SRT server").default_value(std::string{"127.0.0.1"});
+  args.add_argument("--srt_port").help("Port of the downstream SRT server").default_value((uint16_t)5001).scan<'d', uint16_t>();
+  args.add_argument("--verbose").help("Enable verbose logging").default_value(false).implicit_value(true);
 
-  int srtla_port = parse_port(ARG_LISTEN_PORT);
-  if (srtla_port < 0) {
-    print_help();
-    exit(0);
-  }
+  try {
+		args.parse_args(argc, argv);
+	} catch (const std::runtime_error& err) {
+		std::cerr << err.what() << std::endl;
+		std::cerr << args;
+		std::exit(1);
+	}
+
+  uint16_t srtla_port = args.get<uint16_t>("--srtla_port");
+  std::string srt_hostname = args.get<std::string>("--srt_hostname");
+  std::string srt_port = std::to_string(args.get<uint16_t>("--srt_port"));
+
+  if (args.get<bool>("--verbose"))
+    spdlog::set_level(spdlog::level::debug);
 
   // Try to detect if the SRT server is reachable.
-  int ret = resolve_srt_addr(ARG_SRT_HOST, ARG_SRT_PORT);
+  int ret = resolve_srt_addr(srt_hostname.c_str(), srt_port.c_str());
   if (ret < 0) {
     exit(EXIT_FAILURE);
   }
@@ -634,14 +652,13 @@ int main(int argc, char **argv) {
 
   ret = epoll_add(srtla_sock, EPOLLIN, NULL);
   if (ret != 0) {
-    spdlog::critical("Failed to add the srtla sock to the epoll");
+    spdlog::critical("Failed to add the SRTLA sock to the epoll");
     exit(EXIT_FAILURE);
   }
 
   spdlog::info("irltk_srtla_rec is now running");
 
   while(true) {
-    #define MAX_EPOLL_EVENTS 10
     struct epoll_event events[MAX_EPOLL_EVENTS];
     int eventcnt = epoll_wait(socket_epoll, events, MAX_EPOLL_EVENTS, 1000);
 

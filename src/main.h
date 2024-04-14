@@ -59,6 +59,8 @@ struct srtla_conn_group {
     ~srtla_conn_group();
 
     std::vector<struct sockaddr> get_client_addresses();
+    void write_socket_info_file();
+    void remove_socket_info_file();
 };
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
 
