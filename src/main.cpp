@@ -246,7 +246,7 @@ int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
 
   conn_groups.push_back(group);
 
-  spdlog::info("[{}:{}] Group {} registered", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
+  spdlog::info("[{}:{}] [Group: {}] Group registered", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
   return 0;
 }
 
