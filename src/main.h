@@ -27,7 +27,7 @@ extern "C" {
 #include "common.h"
 }
 
-#define MAX_CONNS_PER_GROUP 8
+#define MAX_CONNS_PER_GROUP 16
 #define MAX_GROUPS          200
 
 #define CLEANUP_PERIOD 3
