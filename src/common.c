@@ -1,6 +1,7 @@
 /*
-    srtla - SRT transport proxy with link aggregation
+    irltk_srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
     Copyright (C) 2020-2021 BELABOX project
+    Copyright (C) 2024 IRLToolkit Inc.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by
@@ -25,11 +26,6 @@
 #include <time.h>
 
 #include "common.h"
-
-void exit_help() {
-  print_help();
-  exit(EXIT_FAILURE);
-}
 
 #define ADDR_BUF_SZ 50
 char _global_addr_buf[ADDR_BUF_SZ];

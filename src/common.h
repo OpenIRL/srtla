@@ -1,6 +1,7 @@
 /*
-    srtla - SRT transport proxy with link aggregation
+    irltk_srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
     Copyright (C) 2020-2021 BELABOX project
+    Copyright (C) 2024 IRLToolkit Inc.
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by
@@ -32,12 +33,18 @@
 #define SRTLA_TYPE_REG_NGP   0x9211
 #define SRTLA_TYPE_REG_NAK   0x9212
 
+#define SRTLA_EXT_IRLTK_CIP_REQ 0xA000
+#define SRTLA_EXT_IRLTK_CIP_RES 0xA001
+
 #define SRT_MIN_LEN          16
 
 #define SRTLA_ID_LEN         256
 #define SRTLA_TYPE_REG1_LEN  (2 + (SRTLA_ID_LEN))
 #define SRTLA_TYPE_REG2_LEN  (2 + (SRTLA_ID_LEN))
 #define SRTLA_TYPE_REG3_LEN  2
+
+#define SRTLA_EXT_IRLTK_CIP_REQ_LEN 2
+#define SRTLA_EXT_IRLTK_CIP_RES_LEN (2 + sizeof(srtla_pkt_irltk_cip_res))
 
 typedef struct __attribute__((__packed__)) {
   uint16_t type;
@@ -61,33 +68,10 @@ typedef struct __attribute__((__packed__)) {
   char     peer_ip[16];
 } srt_handshake_t;
 
-#define LOG_NONE    0   // prints only fatal errors
-#define LOG_ERR     1   // prints errors we can tolerate
-#define LOG_INFO    2   // prints informational messages
-#define LOG_DEBUG   3   // prints potentially verbose messages about the internal workings
-
-#define LOG_LEVEL LOG_INFO
-
-#if LOG_LEVEL >= LOG_DEBUG
-  #define debug(...) fprintf(stderr, __VA_ARGS__)
-#else
-  #define debug(...)
-#endif
-
-#if LOG_LEVEL >= LOG_INFO
-  #define info(...) fprintf(stderr, __VA_ARGS__)
-#else
-  #define info(...)
-#endif
-
-#if LOG_LEVEL >= LOG_ERR
-  #define err(...) fprintf(stderr, __VA_ARGS__)
-#else
-  #define err(...)
-#endif
-
-void print_help();
-void exit_help();
+typedef struct __attribute__((__packed__)) {
+  uint8_t address_family;
+  uint8_t address[16];
+} srtla_ext_irltk_cip_res;
 
 int get_seconds(time_t *s);
 int get_ms(uint64_t *ms);
