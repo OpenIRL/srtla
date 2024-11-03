@@ -1,25 +1,25 @@
 cmake_minimum_required(VERSION 3.16)
-project(irltk_srtla_rec VERSION 1.0.0)
+project(srtla_rec VERSION 1.0.0)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake/Modules")
 
 find_package(spdlog REQUIRED)
 
-add_executable(irltk_srtla_rec
+add_executable(srtla_rec
     src/common.c
     src/common.h
     src/main.cpp
     src/main.h)
 
-target_include_directories(irltk_srtla_rec PRIVATE
+target_include_directories(srtla_rec PRIVATE
 	"deps/argparse/include")
 
-target_link_libraries(irltk_srtla_rec PRIVATE
+target_link_libraries(srtla_rec PRIVATE
     spdlog::spdlog)
 
-target_compile_features(irltk_srtla_rec PRIVATE cxx_std_17)
-#target_compile_options(irltk_srtla_rec PRIVATE -Wall -Wextra)
-target_compile_definitions(irltk_srtla_rec PUBLIC VERSION="${CMAKE_PROJECT_VERSION}")
+target_compile_features(srtla_rec PRIVATE cxx_std_17)
+#target_compile_options(srtla_rec PRIVATE -Wall -Wextra)
+target_compile_definitions(srtla_rec PUBLIC VERSION="${CMAKE_PROJECT_VERSION}")
 
 set(CMAKE_BUILD_TYPE RelWithDebInfo)
-install(TARGETS irltk_srtla_rec)
+install(TARGETS srtla_rec)
