@@ -1,7 +1,8 @@
 /*
-    irltk_srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
+    srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
     Copyright (C) 2020-2021 BELABOX project
     Copyright (C) 2024 IRLToolkit Inc.
+    Copyright (C) 2024 OpenIRL
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by

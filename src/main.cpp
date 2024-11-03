@@ -1,5 +1,5 @@
 /*
-    irltk_srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
+    srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
     Copyright (C) 2020-2021 BELABOX project
     Copyright (C) 2024 IRLToolkit Inc.
 
@@ -589,7 +589,7 @@ int resolve_srt_addr(const char *host, const char *port) {
 }
 
 int main(int argc, char **argv) {
-  argparse::ArgumentParser args("irltk_srtla_rec", VERSION);
+  argparse::ArgumentParser args("srtla_rec", VERSION);
 
   args.add_argument("--srtla_port").help("Port to bind the SRTLA socket to").default_value((uint16_t)5000).scan<'d', uint16_t>();
   args.add_argument("--srt_hostname").help("Hostname of the downstream SRT server").default_value(std::string{"127.0.0.1"});
@@ -656,7 +656,7 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  spdlog::info("irltk_srtla_rec is now running");
+  spdlog::info("srtla_rec is now running");
 
   while(true) {
     struct epoll_event events[MAX_EPOLL_EVENTS];
