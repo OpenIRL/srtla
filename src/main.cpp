@@ -141,9 +141,18 @@ void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_c
 
 srtla_conn::srtla_conn(struct sockaddr &_addr, time_t ts) :
   addr(_addr),
-  last_rcvd(ts)
+  last_rcvd(ts),
+  recv_idx(0)
 {
   recv_log.fill(0);
+  stats = {
+    0,                              // bytes_sent
+    0,                              // packets_sent
+    0,                              // packets_lost
+    0.0,                            // current_bandwidth
+    0.0,                            // packet_loss_rate
+    std::chrono::steady_clock::now() // last_update
+  };
 }
 
 srtla_conn_group::srtla_conn_group(char *client_id, time_t ts) :
@@ -315,14 +324,72 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   return 0;
 }
 
+
+void update_connection_stats(srtla_conn_ptr &conn, size_t bytes_sent, bool packet_lost = false) {
+  auto now = std::chrono::steady_clock::now();
+  auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - conn->stats.last_update).count();
+
+  conn->stats.bytes_sent += bytes_sent;
+  conn->stats.packets_sent++;
+  if (packet_lost) conn->stats.packets_lost++;
+
+  // Update stats every second
+  if (duration >= 1000) {
+    double seconds = duration / 1000.0;
+
+    // Calculate bandwidth in Mbps
+    conn->stats.current_bandwidth = (conn->stats.bytes_sent * 8.0 / 1000000.0) / seconds;
+
+    // Calculate packet loss rate
+    conn->stats.packet_loss_rate = conn->stats.packets_lost / (double)conn->stats.packets_sent;
+
+    // Reset counters
+    conn->stats.bytes_sent = 0;
+    conn->stats.packets_sent = 0;
+    conn->stats.packets_lost = 0;
+    conn->stats.last_update = now;
+  }
+}
+
+srtla_conn_ptr select_best_connection(srtla_conn_group_ptr &group) {
+  if (group->conns.empty()) return nullptr;
+
+  srtla_conn_ptr best_conn = nullptr;
+  double best_score = -1;
+
+  for (auto &conn : group->conns) {
+      // Base weighting based on the bandwidth
+      double bandwidth_weight = conn->stats.current_bandwidth > 0 ? conn->stats.current_bandwidth : 1.0;
+
+      // Weighting based on package losses (1 = no losses, 0 = 100% losses)
+      double loss_weight = 1.0 - conn->stats.packet_loss_rate;
+
+      // Time factor - prefer recently active connections
+      double time_weight = 1.0 / (1.0 + (time(NULL) - conn->last_rcvd));
+
+      // Combined rating
+      double score = bandwidth_weight * loss_weight * time_weight;
+
+      // Small random component (±5%) to avoid "sticking"
+      score *= (0.95 + ((double)rand() / RAND_MAX) * 0.1);
+
+    if (score > best_score) {
+      best_score = score;
+      best_conn = conn;
+    }
+  }
+
+  return best_conn ? best_conn : group->conns[0];
+}
+
+
 /*
 The main network event handlers
 */
 void handle_srt_data(srtla_conn_group_ptr g) {
   char buf[MTU];
 
-  if (!g)
-    return;
+  if (!g) return;
 
   int n = recv(g->srt_sock, &buf, MTU, 0);
   if (n < SRT_MIN_LEN) {
@@ -336,15 +403,35 @@ void handle_srt_data(srtla_conn_group_ptr g) {
     // Broadcast SRT ACKs over all connections for timely delivery
     for (auto &conn : g->conns) {
       int ret = sendto(srtla_sock, &buf, n, 0, &conn->addr, addr_len);
-      if (ret != n)
-        spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
+      if (ret != n) {
+        update_connection_stats(conn, n, true);
+        spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT ack",
+                     print_addr(&conn->addr), port_no(&conn->addr),
+                     static_cast<void *>(g.get()));
+      } else {
+        update_connection_stats(conn, n);
+      }
     }
   } else {
-    // send other packets over the most recently used SRTLA connection
-    int ret = sendto(srtla_sock, &buf, n, 0, &g->last_addr, addr_len);
-    if (ret != n) {
-      spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet", print_addr(&g->last_addr), port_no(&g->last_addr), static_cast<void *>(g.get()));
+    // Wähle die beste Verbindung für das Paket
+    auto best_conn = select_best_connection(g);
+    if (!best_conn) {
+      spdlog::error("[Group: {}] No valid connection available", static_cast<void *>(g.get()));
+      return;
     }
+
+    int ret = sendto(srtla_sock, &buf, n, 0, &best_conn->addr, addr_len);
+    if (ret != n) {
+      update_connection_stats(best_conn, n, true);
+      spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet",
+                   print_addr(&best_conn->addr), port_no(&best_conn->addr),
+                   static_cast<void *>(g.get()));
+    } else {
+      update_connection_stats(best_conn, n);
+    }
+
+    // Update last_addr for compatibility
+    g->last_addr = best_conn->addr;
   }
 }
 

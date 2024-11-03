@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <chrono>
+#include <array>
 #include <memory>
 
 #include <spdlog/spdlog.h>
@@ -39,14 +41,26 @@ extern "C" {
 
 #define SRT_SOCKET_INFO_PREFIX "/tmp/srtla-group-"
 
-struct srtla_conn {
-    struct sockaddr addr = {};
-    time_t last_rcvd = 0;
-    int recv_idx = 0;
-    std::array<uint32_t, RECV_ACK_INT> recv_log;
+struct connection_stats {
+    uint64_t bytes_sent;
+    uint64_t packets_sent;
+    uint64_t packets_lost;
+    double current_bandwidth;    // in Mbps
+    double packet_loss_rate;
+    std::chrono::steady_clock::time_point last_update;
+};
 
+struct srtla_conn {
+    struct sockaddr addr;
+    time_t last_rcvd;
+    int recv_idx;
+    std::array<uint32_t, RECV_ACK_INT> recv_log;
+    connection_stats stats;
+
+    // Nur die Deklaration im Header
     srtla_conn(struct sockaddr &_addr, time_t ts);
 };
+
 typedef std::shared_ptr<srtla_conn> srtla_conn_ptr;
 
 struct srtla_conn_group {
