@@ -130,6 +130,7 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
   // Reset usage counters periodically to prevent long-term dominance
   static time_t last_reset = 0;
   time_t current_time;
+  int conn_count = group->conns.size();
   get_seconds(&current_time);
 
   // Track total usage and active connections for load balancing decisions
@@ -144,7 +145,7 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
   }
   
   // Reset usage counters every 30 seconds to prevent permanent imbalance
-  if (current_time - last_reset > 30) {
+  if (current_time - last_reset > (conn_count <= 2 ? 60 : 30)) {  // Less frequent resets with fewer connections
     last_reset = current_time;
     for (auto &conn : group->conns) {
       conn->usage_counter = 0;
@@ -167,7 +168,7 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
     bool is_active = (conn->last_rcvd + CONN_TIMEOUT) >= current_time;
     
     // Calculate relative freshness (0.0-1.0)
-    if (is_active) {
+    if (is_active || (conn_count <= 2 && (conn->last_rcvd + (CONN_TIMEOUT * 1.2)) >= current_time)) {
       active_conn_count++;
     }
     
@@ -188,21 +189,29 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
     // Calculate distribution factor based on current distribution
     double distribution_factor = 1.0; // Default neutral value
     if (expected_share > 0) {
-      // For underutilized connections, give them a boost proportional to how underutilized they are
-      if (actual_share < expected_share * (1.0 - FAIR_SHARE_THRESHOLD)) {
-        // How far below fair share?
-        double shortfall = (expected_share - actual_share) / expected_share;
-        // Give bonus based on shortfall, but cap it for new connections
-        distribution_factor = std::min(5.0, 1.0 + (shortfall * 5.0));
+      // Special case for few connections: ensure minimum traffic
+      if (conn_count <= 2) {
+        // Less aggressive balancing with fewer connections
+        // Each connection should get at least 30% of traffic
+        if (actual_share < 0.3)
+          distribution_factor = 2.0;
+      } else {
+        // For underutilized connections, give them a boost proportional to how underutilized they are
+        if (actual_share < expected_share * (1.0 - FAIR_SHARE_THRESHOLD)) {
+          // How far below fair share?
+          double shortfall = (expected_share - actual_share) / expected_share;
+          // Give bonus based on shortfall, but cap it for new connections
+          distribution_factor = std::min(5.0, 1.0 + (shortfall * 5.0));
+        }
+        // For overutilized connections, reduce their priority proportionally
+        else if (actual_share > expected_share * (1.0 + FAIR_SHARE_THRESHOLD)) {
+          // How far above fair share?
+          double excess = (actual_share - expected_share) / expected_share;
+          // Reduce factor based on excess
+          distribution_factor = std::max(0.2, 1.0 - (excess * 1.5));
+        }
+        // If the connection is within fair share threshold, keep neutral factor
       }
-      // For overutilized connections, reduce their priority proportionally
-      else if (actual_share > expected_share * (1.0 + FAIR_SHARE_THRESHOLD)) {
-        // How far above fair share?
-        double excess = (actual_share - expected_share) / expected_share;
-        // Reduce factor based on excess
-        distribution_factor = std::max(0.2, 1.0 - (excess * 1.5));
-      }
-      // If the connection is within fair share threshold, keep neutral factor
     }
 
     // Give a strong bonus to connections that were recently recovered
@@ -249,12 +258,21 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
   // Calculate if rotation is needed based on distribution
   bool needs_rotation = false;
   if (total_usage > 0 && active_conn_count >= 2) {
-    double expected_per_conn = 1.0 / active_conn_count;
-    for (auto &conn : group->conns) {
-      double share = static_cast<double>(conn->usage_counter) / total_usage;
-      if (fabs(share - expected_per_conn) / expected_per_conn > FAIR_SHARE_THRESHOLD * 2) {
-        needs_rotation = true;
-        break;
+    // For fewer connections, be less aggressive with rotation to maintain stability
+    if (conn_count <= 2) {
+      // Only trigger rotation if extreme imbalance (one connection getting <10% or >90%)
+      for (auto &conn : group->conns) {
+        double share = static_cast<double>(conn->usage_counter) / total_usage;
+        if (share < 0.1 || share > 0.9) needs_rotation = true;
+      }
+    } else {
+      double expected_per_conn = 1.0 / active_conn_count;
+      for (auto &conn : group->conns) {
+        double share = static_cast<double>(conn->usage_counter) / total_usage;
+        if (fabs(share - expected_per_conn) / expected_per_conn > FAIR_SHARE_THRESHOLD * 2) {
+          needs_rotation = true;
+          break;
+        }
       }
     }
   }
@@ -262,7 +280,7 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
   rotation_counter++;
 
   // Every 10th packet, select the least used connection
-  if (best_conn && (rotation_counter % 10 == 0)) {
+  if (best_conn && (rotation_counter % (conn_count <= 2 ? 30 : 10) == 0)) {
     srtla_conn_ptr least_used = nullptr;
     uint64_t min_usage = UINT64_MAX;
     
@@ -679,7 +697,8 @@ void cleanup_groups_connections(time_t ts) {
     for (std::vector<srtla_conn_ptr>::iterator cit = group->conns.begin(); cit != group->conns.end();) {
       auto conn = *cit;
 
-      if ((conn->last_rcvd + (CONN_TIMEOUT * 1.5)) < ts) {
+      // Longer timeout for connections when there are few of them
+      if ((conn->last_rcvd + (CONN_TIMEOUT * (group->conns.size() <= 2 ? 2.5 : 1.5))) < ts) {
         cit = group->conns.erase(cit);
         removed_conns++;
         spdlog::info("[{}:{}] [Group: {}] Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
@@ -740,6 +759,16 @@ void ping_all_connections(time_t ts) {
     for (auto &conn : group->conns) {
       // Send keepalive to all connections that were recently active or
       // are inactive for more than 1/3 of the timeout
+      
+      // Special case for few connections: more aggressive keepalives
+      if (group->conns.size() <= 2) {
+        // Send more frequent keepalives when there are few connections
+        uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
+        sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
+        // For critical connections, send multiple keepalives
+        if ((ts - conn->last_rcvd) > CONN_TIMEOUT / 6)
+          sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
+      }
       if ((ts - conn->last_rcvd) > (CONN_TIMEOUT / 5)) {
         uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
         sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
