@@ -120,6 +120,39 @@ srtla_conn_group_ptr group_find_by_id(char *id) {
   return nullptr;
 }
 
+srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
+  if (!group || group->conns.empty())
+    return nullptr;
+
+  srtla_conn_ptr best_conn = nullptr;
+  time_t current_time;
+  get_seconds(&current_time);
+
+  uint64_t best_score = 0;
+  
+  for (auto &conn : group->conns) {
+    if ((conn->last_rcvd + CONN_TIMEOUT) < current_time)
+      continue;
+      
+    double freshness = 1.0 - std::min(1.0, static_cast<double>(current_time - conn->last_rcvd) / CONN_TIMEOUT);
+    
+    uint64_t score = static_cast<uint64_t>(freshness * 1000) + (100 - (conn->usage_counter % 100));
+    
+    if (!best_conn || score > best_score) {
+      best_conn = conn;
+      best_score = score;
+    }
+  }
+  
+  if (!best_conn && !group->conns.empty())
+    best_conn = group->conns.front();
+    
+  if (best_conn)
+    best_conn->usage_counter++;
+    
+  return best_conn;
+}
+
 void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_conn_ptr &rc) {
   for (auto &group : conn_groups) {
     for (auto &conn : group->conns) {
@@ -340,10 +373,14 @@ void handle_srt_data(srtla_conn_group_ptr g) {
         spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
     }
   } else {
-    // send other packets over the most recently used SRTLA connection
-    int ret = sendto(srtla_sock, &buf, n, 0, &g->last_addr, addr_len);
+    srtla_conn_ptr best_conn = select_best_conn(g);
+    struct sockaddr* target_addr = best_conn ? &best_conn->addr : &g->last_addr;
+    
+    int ret = sendto(srtla_sock, &buf, n, 0, target_addr, addr_len);
     if (ret != n) {
-      spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet", print_addr(&g->last_addr), port_no(&g->last_addr), static_cast<void *>(g.get()));
+      spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet", 
+                    print_addr(target_addr), port_no(target_addr), 
+                    static_cast<void *>(g.get()));
     }
   }
 }
@@ -482,6 +519,7 @@ void cleanup_groups_connections(time_t ts) {
   int total_conns = 0;
   int removed_groups = 0;
   int removed_conns = 0;
+  int recovered_conns = 0;
 
   for (std::vector<srtla_conn_group_ptr>::iterator git = conn_groups.begin(); git != conn_groups.end();) {
     auto group = *git;
@@ -491,11 +529,25 @@ void cleanup_groups_connections(time_t ts) {
     for (std::vector<srtla_conn_ptr>::iterator cit = group->conns.begin(); cit != group->conns.end();) {
       auto conn = *cit;
 
-      if ((conn->last_rcvd + CONN_TIMEOUT) < ts) {
+      if ((conn->last_rcvd + (CONN_TIMEOUT * 2)) < ts) {
         cit = group->conns.erase(cit);
         removed_conns++;
         spdlog::info("[{}:{}] [Group: {}] Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+      } else if ((conn->last_rcvd + (CONN_TIMEOUT / 2)) < ts && (conn->recovery_attempts < 3)) {
+        uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
+        int ret = sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
+        if (ret == sizeof(header)) {
+          conn->recovery_attempts++;
+          spdlog::debug("[{}:{}] [Group: {}] Attempting to recover connection (attempt {})", 
+                      print_addr(&conn->addr), port_no(&conn->addr), 
+                      static_cast<void *>(group.get()), conn->recovery_attempts);
+          recovered_conns++;
+        }
+        cit++;
       } else {
+        if (conn->recovery_attempts > 0 && (conn->last_rcvd + 2) >= ts) {
+          conn->recovery_attempts = 0;
+        }
         cit++;
       }
     }
@@ -511,7 +563,8 @@ void cleanup_groups_connections(time_t ts) {
     }
   }
 
-  spdlog::debug("Clean up run ended. Counted {} groups and {} connections. Removed {} groups and {} connections", total_groups, total_conns, removed_groups, removed_conns);
+  spdlog::debug("Clean up run ended. Counted {} groups and {} connections. Removed {} groups, {} connections, and attempted to recover {} connections", 
+               total_groups, total_conns, removed_groups, removed_conns, recovered_conns);
 }
 
 /*

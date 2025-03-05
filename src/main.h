@@ -44,6 +44,9 @@ struct srtla_conn {
     time_t last_rcvd = 0;
     int recv_idx = 0;
     std::array<uint32_t, RECV_ACK_INT> recv_log;
+    
+    uint64_t usage_counter = 0;
+    int recovery_attempts = 0;
 
     srtla_conn(struct sockaddr &_addr, time_t ts);
 };
