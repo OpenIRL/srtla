@@ -124,7 +124,17 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
   if (!group || group->conns.empty())
     return nullptr;
 
-  // Check first if all connections are inactive
+  // Define what we consider "fair share" threshold (±15% of expected share)
+  const double FAIR_SHARE_THRESHOLD = 0.15;
+
+  // Reset usage counters periodically to prevent long-term dominance
+  static time_t last_reset = 0;
+  time_t current_time;
+  get_seconds(&current_time);
+
+  // Track total usage and active connections for load balancing decisions
+  uint64_t total_usage = 0;
+  // First check if all connections are inactive
   bool all_inactive = true;
   for (auto &conn : group->conns) {
     if (conn->recovery_attempts == 0) {
@@ -133,26 +143,84 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
     }
   }
   
-  srtla_conn_ptr best_conn = nullptr;
-  time_t current_time;
-  get_seconds(&current_time);
+  // Reset usage counters every 30 seconds to prevent permanent imbalance
+  if (current_time - last_reset > 30) {
+    last_reset = current_time;
+    for (auto &conn : group->conns) {
+      conn->usage_counter = 0;
+    }
+    spdlog::info("[Group: {}] Reset usage counters to ensure fair distribution", static_cast<void *>(group.get()));
+  }
 
+  // Calculate total usage across all active connections
+  for (auto &conn : group->conns) {
+    if ((conn->last_rcvd + CONN_TIMEOUT) >= current_time)
+      total_usage += conn->usage_counter;
+  }
+
+  srtla_conn_ptr best_conn = nullptr;
+  int active_conn_count = 0;
   int64_t best_score = -1;
   
   for (auto &conn : group->conns) {
-    if ((conn->last_rcvd + CONN_TIMEOUT) < current_time)
-      continue;
-      
+    // Don't skip inactive connections entirely - they need a chance to recover
+    bool is_active = (conn->last_rcvd + CONN_TIMEOUT) >= current_time;
+    
+    // Calculate relative freshness (0.0-1.0)
+    if (is_active) {
+      active_conn_count++;
+    }
+    
     double freshness = 1.0 - std::min(1.0, static_cast<double>(current_time - conn->last_rcvd) / CONN_TIMEOUT);
     
-    // Stronger weighting of connection freshness and reduced weighting of usage counter
-    int64_t score = static_cast<int64_t>(freshness * 2000) - conn->recovery_attempts * 200;
+    // Calculate the expected usage share for perfect distribution
+    double expected_share = 1.0 / group->conns.size();
     
-    // If all connections are inactive, also try recovery attempts
-    if (all_inactive || conn->recovery_attempts < 3) {
-      // Try to distribute usage evenly
-      score += (100 - (conn->usage_counter % 100));
+    // Calculate actual usage share
+    double actual_share = total_usage > 0 ? 
+                          static_cast<double>(conn->usage_counter) / total_usage : 
+                          0.0;
+    
+    // Calculate fair share (expected share with tolerance)
+    bool is_fair_share = (active_conn_count > 0) && 
+                         (fabs(actual_share - expected_share) / expected_share <= FAIR_SHARE_THRESHOLD);
+    
+    // Calculate distribution factor based on current distribution
+    double distribution_factor = 1.0; // Default neutral value
+    if (expected_share > 0) {
+      // For underutilized connections, give them a boost proportional to how underutilized they are
+      if (actual_share < expected_share * (1.0 - FAIR_SHARE_THRESHOLD)) {
+        // How far below fair share?
+        double shortfall = (expected_share - actual_share) / expected_share;
+        // Give bonus based on shortfall, but cap it for new connections
+        distribution_factor = std::min(5.0, 1.0 + (shortfall * 5.0));
+      }
+      // For overutilized connections, reduce their priority proportionally
+      else if (actual_share > expected_share * (1.0 + FAIR_SHARE_THRESHOLD)) {
+        // How far above fair share?
+        double excess = (actual_share - expected_share) / expected_share;
+        // Reduce factor based on excess
+        distribution_factor = std::max(0.2, 1.0 - (excess * 1.5));
+      }
+      // If the connection is within fair share threshold, keep neutral factor
     }
+
+    // Give a strong bonus to connections that were recently recovered
+    bool recently_recovered = conn->recovery_attempts > 0 && 
+                             (current_time - conn->last_rcvd) < 3;
+    // But only if they haven't yet reached fair share
+    if (recently_recovered && is_fair_share)
+      recently_recovered = false;
+    
+    int64_t recovery_bonus = recently_recovered ? 2000 : 0;
+    
+    // Calculate final score with more weight on even distribution
+    int64_t score = recovery_bonus + 
+                    static_cast<int64_t>((distribution_factor * 1500) + 
+                                         // Inactive connections get a small penalty
+                                         (is_active ? 0 : -500) + 
+                                         (freshness * 500)) - 
+                                         (conn->recovery_attempts * 200);
     
     if (best_score < 0 || score > best_score) {
       best_conn = conn;
@@ -166,8 +234,71 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
     spdlog::debug("[Group: {}] All connections inactive, trying recovery connections", static_cast<void *>(group.get()));
   }
     
-  if (best_conn)
+  // Log the distribution statistics periodically
+  static time_t last_log = 0;
+  if (current_time - last_log > 10) {
+    last_log = current_time;
+    for (auto &conn : group->conns) {
+      double percent = total_usage > 0 ? 
+                      (double)conn->usage_counter / total_usage * 100.0 : 0.0;
+      spdlog::debug("[{}:{}] Usage: {:.1f}% (Expected: {:.1f}%)", print_addr(&conn->addr), 
+                   port_no(&conn->addr), percent, (100.0 / group->conns.size()));
+    }
+  }
+    
+  // Calculate if rotation is needed based on distribution
+  bool needs_rotation = false;
+  if (total_usage > 0 && active_conn_count >= 2) {
+    double expected_per_conn = 1.0 / active_conn_count;
+    for (auto &conn : group->conns) {
+      double share = static_cast<double>(conn->usage_counter) / total_usage;
+      if (fabs(share - expected_per_conn) / expected_per_conn > FAIR_SHARE_THRESHOLD * 2) {
+        needs_rotation = true;
+        break;
+      }
+    }
+  }
+  static uint64_t rotation_counter = 0;
+  rotation_counter++;
+
+  // Every 10th packet, select the least used connection
+  if (best_conn && (rotation_counter % 10 == 0)) {
+    srtla_conn_ptr least_used = nullptr;
+    uint64_t min_usage = UINT64_MAX;
+    
+    for (auto &conn : group->conns) {
+      // Include recently recovered connections regardless of activity
+      bool recently_active = (conn->last_rcvd + (CONN_TIMEOUT / 2)) >= current_time;
+      
+      if (!recently_active && conn->recovery_attempts == 0)
+        continue;
+      
+      if (!needs_rotation && (rotation_counter % 30 != 0))
+        continue; // Skip only completely inactive connections
+        
+      if (conn->usage_counter < min_usage) {
+        min_usage = conn->usage_counter;
+        least_used = conn;
+      }
+    }
+    
+    if (least_used && least_used != best_conn) {
+      best_conn = least_used;
+      spdlog::debug("[Group: {}] Rotation: switching to least used connection [{}:{}]",
+                   static_cast<void *>(group.get()),
+                   print_addr(&least_used->addr), port_no(&least_used->addr));
+      if (!needs_rotation)
+        spdlog::debug("Periodic rotation even though distribution is balanced");
+    }
+  }
+  
+  if (best_conn) {
     best_conn->usage_counter++;
+    // Reset recovery attempts when connection is used successfully
+    if (best_conn->recovery_attempts > 0) {
+      best_conn->recovery_attempts = 0;
+    }
+  }
     
   return best_conn;
 }
@@ -609,13 +740,23 @@ void ping_all_connections(time_t ts) {
     for (auto &conn : group->conns) {
       // Send keepalive to all connections that were recently active or
       // are inactive for more than 1/3 of the timeout
-      if ((ts - conn->last_rcvd) > (CONN_TIMEOUT / 3)) {
+      if ((ts - conn->last_rcvd) > (CONN_TIMEOUT / 5)) {
         uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
         sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
         
-        if (conn->recovery_attempts > 0)
+        if (conn->recovery_attempts > 0) {
           spdlog::debug("[{}:{}] [Group: {}] Probing inactive connection", 
                       print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+        }
+      }
+      
+      // For connections with "recovery_attempts > 0", try even harder to restore them
+      if (conn->recovery_attempts > 0) {
+        // Send multiple keepalives for recovering connections
+        for (int i = 0; i < 2; i++) {
+          uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
+          sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
+        }
       }
     }
   }
