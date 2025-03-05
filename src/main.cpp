@@ -124,11 +124,20 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
   if (!group || group->conns.empty())
     return nullptr;
 
+  // Check first if all connections are inactive
+  bool all_inactive = true;
+  for (auto &conn : group->conns) {
+    if (conn->recovery_attempts == 0) {
+      all_inactive = false;
+      break;
+    }
+  }
+  
   srtla_conn_ptr best_conn = nullptr;
   time_t current_time;
   get_seconds(&current_time);
 
-  uint64_t best_score = 0;
+  int64_t best_score = -1;
   
   for (auto &conn : group->conns) {
     if ((conn->last_rcvd + CONN_TIMEOUT) < current_time)
@@ -136,16 +145,26 @@ srtla_conn_ptr select_best_conn(srtla_conn_group_ptr group) {
       
     double freshness = 1.0 - std::min(1.0, static_cast<double>(current_time - conn->last_rcvd) / CONN_TIMEOUT);
     
-    uint64_t score = static_cast<uint64_t>(freshness * 1000) + (100 - (conn->usage_counter % 100));
+    // Stronger weighting of connection freshness and reduced weighting of usage counter
+    int64_t score = static_cast<int64_t>(freshness * 2000) - conn->recovery_attempts * 200;
     
-    if (!best_conn || score > best_score) {
+    // If all connections are inactive, also try recovery attempts
+    if (all_inactive || conn->recovery_attempts < 3) {
+      // Try to distribute usage evenly
+      score += (100 - (conn->usage_counter % 100));
+    }
+    
+    if (best_score < 0 || score > best_score) {
       best_conn = conn;
       best_score = score;
     }
   }
   
-  if (!best_conn && !group->conns.empty())
-    best_conn = group->conns.front();
+  // If no good candidate was found and all_inactive is true,
+  // still try connections with recovery attempts
+  if (!best_conn && !group->conns.empty() && all_inactive) {
+    spdlog::debug("[Group: {}] All connections inactive, trying recovery connections", static_cast<void *>(group.get()));
+  }
     
   if (best_conn)
     best_conn->usage_counter++;
@@ -529,24 +548,31 @@ void cleanup_groups_connections(time_t ts) {
     for (std::vector<srtla_conn_ptr>::iterator cit = group->conns.begin(); cit != group->conns.end();) {
       auto conn = *cit;
 
-      if ((conn->last_rcvd + (CONN_TIMEOUT * 2)) < ts) {
+      if ((conn->last_rcvd + (CONN_TIMEOUT * 1.5)) < ts) {
         cit = group->conns.erase(cit);
         removed_conns++;
         spdlog::info("[{}:{}] [Group: {}] Connection removed (timed out)", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
-      } else if ((conn->last_rcvd + (CONN_TIMEOUT / 2)) < ts && (conn->recovery_attempts < 3)) {
-        uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
-        int ret = sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
-        if (ret == sizeof(header)) {
-          conn->recovery_attempts++;
-          spdlog::debug("[{}:{}] [Group: {}] Attempting to recover connection (attempt {})", 
-                      print_addr(&conn->addr), port_no(&conn->addr), 
-                      static_cast<void *>(group.get()), conn->recovery_attempts);
-          recovered_conns++;
-        }
-        cit++;
       } else {
-        if (conn->recovery_attempts > 0 && (conn->last_rcvd + 2) >= ts) {
-          conn->recovery_attempts = 0;
+        // More aggressive recovery logic:
+        // 1. Starts earlier with recovery attempts (1/4 of CONN_TIMEOUT)
+        // 2. Allows more recovery attempts (5 instead of 3)
+        // 3. Sends multiple keepalive packets with each attempt
+        bool should_attempt_recovery = 
+            (conn->last_rcvd + (CONN_TIMEOUT / 4)) < ts && (conn->recovery_attempts < 5);
+        
+        if (should_attempt_recovery) {
+          uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
+          // Send multiple keepalives to increase success probability
+          for (int i = 0; i < 3; i++) {
+            int ret = sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
+            if (ret == sizeof(header)) {
+              recovered_conns++;
+            }
+          }
+          conn->recovery_attempts++;
+          spdlog::debug("[{}:{}] [Group: {}] Attempting to recover connection (attempt {}/5)", 
+                       print_addr(&conn->addr), port_no(&conn->addr), 
+                       static_cast<void *>(group.get()), conn->recovery_attempts);
         }
         cit++;
       }
@@ -565,6 +591,34 @@ void cleanup_groups_connections(time_t ts) {
 
   spdlog::debug("Clean up run ended. Counted {} groups and {} connections. Removed {} groups, {} connections, and attempted to recover {} connections", 
                total_groups, total_conns, removed_groups, removed_conns, recovered_conns);
+}
+
+// New function: Proactive ping for connection monitoring
+void ping_all_connections(time_t ts) {
+  static time_t last_ping = 0;
+  // Execute ping every 2 seconds
+  if ((last_ping + 2) > ts)
+    return;
+  last_ping = ts;
+
+  if (conn_groups.empty())
+    return;
+
+  // Ping all connections to keep them active
+  for (auto &group : conn_groups) {
+    for (auto &conn : group->conns) {
+      // Send keepalive to all connections that were recently active or
+      // are inactive for more than 1/3 of the timeout
+      if ((ts - conn->last_rcvd) > (CONN_TIMEOUT / 3)) {
+        uint16_t header = htobe16(SRTLA_TYPE_KEEPALIVE);
+        sendto(srtla_sock, &header, sizeof(header), 0, &conn->addr, addr_len);
+        
+        if (conn->recovery_attempts > 0)
+          spdlog::debug("[{}:{}] [Group: {}] Probing inactive connection", 
+                      print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
+      }
+    }
+  }
 }
 
 /*
@@ -739,6 +793,7 @@ int main(int argc, char **argv) {
     } // for
 
     cleanup_groups_connections(ts);
+    ping_all_connections(ts);
   }
 }
 

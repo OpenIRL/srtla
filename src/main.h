@@ -72,3 +72,7 @@ struct srtla_ack_pkt {
     uint32_t type;
     uint32_t acks[RECV_ACK_INT];
 };
+
+// Connection management functions
+void cleanup_groups_connections(time_t ts);
+void ping_all_connections(time_t ts);
