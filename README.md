@@ -12,6 +12,8 @@ srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to 
 - Automatic management of connection groups and individual connections
 - Robust error handling and timeouts for inactive connections
 - Logging of connection details for easy diagnostics
+- Improved load balancing through ACK throttling
+- Connection recovery mechanism for temporary network issues
 
 ## Requirements
 
@@ -92,7 +94,93 @@ SRTLA implements a protocol for packet transmission over multiple network connec
 
 5. **Connection Cleanup**: Inactive connections and groups are automatically cleaned up after a configurable timeout (default: 10 seconds).
 
+6. **Load Balancing through ACK Throttling**: The server controls ACK frequency to influence the client's connection selection without requiring client-side modifications.
+
+7. **Connection Recovery Mechanism**: Connections that show signs of recovery after temporary outages are given a chance to stabilize again.
+
 The implementation uses epoll for event-based network I/O, allowing efficient handling of multiple simultaneous connections.
+
+## Enhanced Load Balancing and Recovery
+
+This version of SRTLA includes improvements to address two key issues in the original implementation:
+
+### Problem 1: Connections with Issues Had No Recovery Path
+
+In the original implementation, connections with temporary problems were completely disabled. In this enhanced version:
+
+- Connections showing signs of recovery enter a "recovery mode"
+- These connections receive more frequent keepalive packets for a set period (5 seconds)
+- After successful recovery, they are fully reactivated for data transmission
+- Recovery attempts are abandoned after a certain time if unsuccessful
+
+This functionality allows connections to "heal" after brief disruptions (e.g., due to network issues) rather than remaining completely disabled.
+
+### Problem 2: Unbalanced Connection Utilization
+
+In the original implementation, load was unevenly distributed across available connections. The new implementation:
+
+- Introduces a monitoring and evaluation system for connection quality
+- Checks connection quality every 5 seconds based on:
+  - Bandwidth (bytes/s)
+  - Round-Trip Time (ms)
+  - Packet loss rate
+- Assigns error points to each connection based on these metrics
+- Calculates a quality weight for each connection (10% to 100%)
+- Controls ACK packet frequency based on connection quality
+  - Good connections receive ACKs more frequently
+  - Poor connections receive ACKs less frequently
+- Indirectly influences the window size in the client and thus connection selection
+
+The result is better data distribution, with more stable connections carrying more load than problematic ones, without requiring client modifications.
+
+### Technical Implementation Details
+
+#### ACK Throttling
+
+The central innovation of this solution is ACK throttling for load distribution. It's based on the following principles:
+
+1. The SRT/SRTLA client (srtla_send) selects connections based on a score derived from the window size and in-flight packets.
+2. The window size in the client is adjusted when ACKs are received.
+3. By selectively throttling ACK frequency, we can indirectly control how quickly the window grows in the client.
+4. This causes the client to prefer better connections without requiring changes to the client code.
+
+#### Connection Quality Assessment
+
+Connection quality is assessed by measuring and analyzing:
+
+- **Bandwidth**: Low bandwidth leads to more error points
+- **Packet Loss**: Higher loss rates lead to more error points
+
+The weight levels are:
+- 100% (WEIGHT_FULL): Optimal connection
+- 70% (WEIGHT_DEGRADED): Slightly impaired connection
+- 40% (WEIGHT_POOR): Severely impaired connection
+- 10% (WEIGHT_CRITICAL): Critically impaired connection
+
+#### Recovery Mechanism
+
+The recovery functionality works as follows:
+
+1. A connection that receives data again after being marked inactive is placed in recovery mode
+2. In this mode, keepalive packets are sent more frequently (every 1 second)
+3. If the connection remains stable for a short period (5 seconds), it is considered recovered
+4. If recovery does not occur within the time window, the recovery attempt is aborted
+
+### Configuration Parameters
+
+The following parameters can be adjusted to optimize behavior:
+
+- `KEEPALIVE_PERIOD`: Interval for keepalive packets during recovery (1 second)
+- `RECOVERY_CHANCE_PERIOD`: Period during which a connection can attempt to recover (5 seconds)
+- `CONN_QUALITY_EVAL_PERIOD`: Interval for evaluating connection quality (5 seconds)
+- `ACK_THROTTLE_INTERVAL`: Base interval for ACK throttling (100ms)
+- Various weight levels (`WEIGHT_FULL`, `WEIGHT_DEGRADED`, `WEIGHT_POOR`, `WEIGHT_CRITICAL`)
+
+### Limitations
+
+- The RTT calculation is simplified and could be improved in future versions
+- The error point thresholds are static and could be dynamically adjusted to better adapt to different network situations
+- The throttling might be less effective with very short ACK intervals
 
 ## SRT Configuration Recommendations
 
