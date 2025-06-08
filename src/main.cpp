@@ -756,19 +756,41 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
     if (bandwidth_info.empty())
         return;
 
-    // Calculate average and expected bandwidth per connection
+    // Calculate total bandwidth and find the best performing connection
     double total_kbits_per_sec = (total_target_bandwidth * 8.0) / 1000.0;
-    double avg_kbits_per_sec = total_kbits_per_sec / conns.size();
+    double max_kbits_per_sec = 0.0;
+    double median_kbits_per_sec = 0.0;
+    
+    // Find maximum bandwidth to use as reference for good connections
+    std::vector<double> all_bandwidths;
+    for (const auto &info : bandwidth_info) {
+        all_bandwidths.push_back(info.bandwidth_kbits_per_sec);
+        max_kbits_per_sec = std::max(max_kbits_per_sec, info.bandwidth_kbits_per_sec);
+    }
+    
+    // Calculate median bandwidth for more robust reference
+    if (!all_bandwidths.empty()) {
+        std::sort(all_bandwidths.begin(), all_bandwidths.end());
+        size_t mid = all_bandwidths.size() / 2;
+        median_kbits_per_sec = all_bandwidths.size() % 2 == 0 ? 
+            (all_bandwidths[mid-1] + all_bandwidths[mid]) / 2.0 : 
+            all_bandwidths[mid];
+    }
 
-    // Minimum expected bandwidth threshold (for very low bandwidth scenarios)
+    // Dynamic expected bandwidth calculation:
+    // Use the better of maximum or median as baseline, but don't let poor connections drag it down
+    double baseline_kbits_per_sec = std::max(max_kbits_per_sec * 0.8, median_kbits_per_sec);
+    
+    // Minimum expected bandwidth threshold
     double min_expected_kbits_per_sec = 500.0; // 500 Kbps minimum expected
+    
+    // Expected bandwidth per connection - use the higher of baseline or minimum threshold
+    // This prevents good connections from being affected by poor ones
+    double expected_kbits_per_sec = std::max(baseline_kbits_per_sec, min_expected_kbits_per_sec);
 
-    // Expected bandwidth per connection - use max of calculated average or minimum threshold
-    double expected_kbits_per_sec = std::max(avg_kbits_per_sec, min_expected_kbits_per_sec);
-
-    // Log the total and expected bandwidth
-    spdlog::debug("[Group: {}] Total bandwidth: {:.2f} kbits/s, Expected per connection: {:.2f} kbits/s",
-                 static_cast<void *>(this), total_kbits_per_sec, expected_kbits_per_sec);
+    // Log the total and expected bandwidth with new metrics
+    spdlog::debug("[Group: {}] Total bandwidth: {:.2f} kbits/s, Max: {:.2f} kbits/s, Median: {:.2f} kbits/s, Expected per connection: {:.2f} kbits/s",
+                 static_cast<void *>(this), total_kbits_per_sec, max_kbits_per_sec, median_kbits_per_sec, expected_kbits_per_sec);
 
     // Second pass - evaluate each connection against dynamic thresholds
     for (auto &info : bandwidth_info) {
@@ -780,17 +802,20 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
         conn->stats.error_points = 0;
 
         // Dynamic bandwidth evaluation based on expected bandwidth
-        // The thresholds are relative to expected bandwidth
-        if (bandwidth_kbits_per_sec < expected_kbits_per_sec * 0.25) {
-            // Less than 25% of expected bandwidth
-            conn->stats.error_points += 5;
+        if (bandwidth_kbits_per_sec < expected_kbits_per_sec * 0.3) {
+            // Significantly underperforming - high penalty
+            conn->stats.error_points += 40;
         } else if (bandwidth_kbits_per_sec < expected_kbits_per_sec * 0.5) {
-            // Less than 50% of expected bandwidth
+            // Moderately underperforming
+            conn->stats.error_points += 25;
+        } else if (bandwidth_kbits_per_sec < expected_kbits_per_sec * 0.7) {
+            // Slightly underperforming
             conn->stats.error_points += 15;
-        } else if (bandwidth_kbits_per_sec < expected_kbits_per_sec * 0.75) {
-            // Less than 75% of expected bandwidth
-            conn->stats.error_points += 30;
+        } else if (bandwidth_kbits_per_sec < expected_kbits_per_sec * 0.85) {
+            // Marginally below expected - minimal penalty
+            conn->stats.error_points += 5;
         }
+        // Connections performing at 85%+ of expected bandwidth get no penalty
 
         // Packet loss evaluation
             if (packet_loss_ratio > 0.20) { // > 20% loss
