@@ -386,9 +386,6 @@ void register_packet(srtla_conn_group_ptr group, srtla_conn_ptr conn, int32_t sn
       if (conn->stats.last_ack_sent_time > 0 && 
           current_ms < conn->stats.last_ack_sent_time + min_interval) {
         should_send = false;
-        spdlog::debug("[{}:{}] [Group: {}] ACK throttled (factor: {:.2f})",
-            print_addr(&conn->addr), port_no(&conn->addr), 
-            static_cast<void *>(group.get()), conn->stats.ack_throttle_factor);
       }
     }
     
@@ -790,7 +787,7 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
 
     // Log the total and expected bandwidth with new metrics
     spdlog::debug("[Group: {}] Total bandwidth: {:.2f} kbits/s, Max: {:.2f} kbits/s, Median: {:.2f} kbits/s, Expected per connection: {:.2f} kbits/s",
-                 static_cast<void *>(this), total_kbits_per_sec, max_kbits_per_sec, median_kbits_per_sec, expected_kbits_per_sec);
+                 static_cast<void *>(this), total_kbits_per_sec, max_kbits_per_sec * 0.8, median_kbits_per_sec, expected_kbits_per_sec);
 
     // Second pass - evaluate each connection against dynamic thresholds
     for (auto &info : bandwidth_info) {
