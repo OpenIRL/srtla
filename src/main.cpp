@@ -948,9 +948,6 @@ int main(int argc, char **argv) {
   std::string srt_port = std::to_string(args.get<uint16_t>("--srt_port"));
 
   if (args.get<bool>("--verbose"))
-    spdlog::set_level(spdlog::level::trace);
-
-  if (args.get<bool>("--debug"))
     spdlog::set_level(spdlog::level::debug);
 
   // Try to detect if the SRT server is reachable.
