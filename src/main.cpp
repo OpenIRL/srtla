@@ -829,7 +829,7 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
             conn->stats.nack_count = 0;// Calculate bandwidth ratio (actual/expected)
         double bandwidth_ratio = bandwidth_kbits_per_sec / expected_kbits_per_sec;
 
-        spdlog::debug("[{}:{}] [Group: {}] Connection stats: BW: {:.2f} kbits/s ({:.2f}% of expected), Loss: {:.2f}%, Error points: {}",
+        spdlog::trace("[{}:{}] [Group: {}] Connection stats: BW: {:.2f} kbits/s ({:.2f}% of expected), Loss: {:.2f}%, Error points: {}",
                 print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
                 bandwidth_kbits_per_sec, bandwidth_ratio * 100, packet_loss_ratio * 100,
             conn->stats.error_points);
@@ -849,24 +849,35 @@ void srtla_conn_group::adjust_connection_weights() {
     if (conns.empty())
         return;
         
-    spdlog::debug("[Group: {}] Adjusting connection weights", static_cast<void *>(this));
+    bool any_weight_changed = false;
     
     // Adjust weights based on error points
     for (auto &conn : conns) {
+        uint8_t new_weight;
+        
         // Weight adjustment based on error points
         if (conn->stats.error_points >= 40) {
-            conn->stats.weight_percent = WEIGHT_CRITICAL;
+            new_weight = WEIGHT_CRITICAL;
         } else if (conn->stats.error_points >= 20) {
-            conn->stats.weight_percent = WEIGHT_POOR;
+            new_weight = WEIGHT_POOR;
         } else if (conn->stats.error_points >= 10) {
-            conn->stats.weight_percent = WEIGHT_DEGRADED;
+            new_weight = WEIGHT_DEGRADED;
         } else {
-            conn->stats.weight_percent = WEIGHT_FULL;
+            new_weight = WEIGHT_FULL;
         }
         
-        spdlog::debug("[{}:{}] [Group: {}] Connection weight adjusted to: {}%",
-            print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
-            conn->stats.weight_percent);
+        // Only update and log if weight actually changed  
+        if (new_weight != conn->stats.weight_percent) {
+            spdlog::trace("[{}:{}] [Group: {}] Connection weight adjusted: {}% -> {}%",
+                print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
+                conn->stats.weight_percent, new_weight);
+            conn->stats.weight_percent = new_weight;
+            any_weight_changed = true;
+        }
+    }
+    
+    if (any_weight_changed) {
+        spdlog::debug("[Group: {}] Adjusting connection weights", static_cast<void *>(this));
     }
 }
 
@@ -876,16 +887,25 @@ void srtla_conn_group::control_ack_frequency() {
     if (conns.empty())
         return;
     
-    spdlog::debug("[Group: {}] Adjusting ACK frequency for load balancing", static_cast<void *>(this));
+    bool any_throttle_changed = false;
     
     for (auto &conn : conns) {
         // Calculate ACK throttling factor based on weight
         // The lower the weight, the stronger the throttling
-        conn->stats.ack_throttle_factor = static_cast<double>(conn->stats.weight_percent) / 100.0;
+        double new_throttle_factor = static_cast<double>(conn->stats.weight_percent) / 100.0;
         
-        spdlog::debug("[{}:{}] [Group: {}] ACK throttle factor set to: {:.2f}",
-            print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
-            conn->stats.ack_throttle_factor);
+        // Only update and log if throttle factor actually changed (with small tolerance for floating point comparison)
+        if (std::abs(new_throttle_factor - conn->stats.ack_throttle_factor) > 0.01) {
+            spdlog::trace("[{}:{}] [Group: {}] ACK throttle factor changed: {:.2f} -> {:.2f}",
+                print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
+                conn->stats.ack_throttle_factor, new_throttle_factor);
+            conn->stats.ack_throttle_factor = new_throttle_factor;
+            any_throttle_changed = true;
+        }
+    }
+    
+    if (any_throttle_changed) {
+        spdlog::debug("[Group: {}] Adjusting ACK frequency for load balancing", static_cast<void *>(this));
     }
 }
 
@@ -928,6 +948,9 @@ int main(int argc, char **argv) {
   std::string srt_port = std::to_string(args.get<uint16_t>("--srt_port"));
 
   if (args.get<bool>("--verbose"))
+    spdlog::set_level(spdlog::level::trace);
+
+  if (args.get<bool>("--debug"))
     spdlog::set_level(spdlog::level::debug);
 
   // Try to detect if the SRT server is reachable.
