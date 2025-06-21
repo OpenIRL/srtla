@@ -872,8 +872,8 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
                 conn->stats.error_points += 5;
             }
 
-            // Reset NAK count
-            conn->stats.nack_count = 0;
+        // Reset NAK count
+        conn->stats.nack_count = 0;
 
         spdlog::trace("[{}:{}] [Group: {}] Connection stats: BW: {:.2f} kbits/s ({:.2f}% of expected), Loss: {:.2f}%, Error points: {}",
                 print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
