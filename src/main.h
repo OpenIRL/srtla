@@ -44,6 +44,7 @@ extern "C" {
 #define ACK_THROTTLE_INTERVAL 100  // Milliseconds between ACK packets for client control
 #define MIN_ACK_RATE 0.2           // Minimum ACK rate (20%) to keep connections alive
 #define MIN_ACCEPTABLE_TOTAL_BANDWIDTH_KBPS 1000.0 // Minimum total bandwidth for acceptable streaming quality (1 Mbps)
+#define GOOD_CONNECTION_THRESHOLD 0.5 // Threshold for considering a connection "good" (50% of max bandwidth)
 #define WEIGHT_FULL 100
 #define WEIGHT_EXCELLENT 85
 #define WEIGHT_DEGRADED 70
