@@ -45,6 +45,7 @@ extern "C" {
 #define MIN_ACK_RATE 0.2           // Minimum ACK rate (20%) to keep connections alive
 #define MIN_ACCEPTABLE_TOTAL_BANDWIDTH_KBPS 1000.0 // Minimum total bandwidth for acceptable streaming quality (1 Mbps)
 #define GOOD_CONNECTION_THRESHOLD 0.5 // Threshold for considering a connection "good" (50% of max bandwidth)
+#define CONNECTION_GRACE_PERIOD 30 // Grace period in seconds before applying penalties
 #define WEIGHT_FULL 100
 #define WEIGHT_EXCELLENT 85
 #define WEIGHT_DEGRADED 70
@@ -80,6 +81,7 @@ struct srtla_conn {
     // Fields for connection quality evaluation
     connection_stats stats = {};
     time_t recovery_start = 0; // Time when the connection began to recover
+    time_t connection_start = 0; // Time when the connection was established
 
     srtla_conn(struct sockaddr &_addr, time_t ts);
 };
