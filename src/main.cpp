@@ -506,7 +506,7 @@ void handle_srtla_data(time_t ts) {
 
   // Open a connection to the SRT server for the group
   if (g->srt_sock < 0) {
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    int sock = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     if (sock < 0) {
       spdlog::error("[Group: {}] Failed to create an SRT socket", static_cast<void *>(g.get()));
       remove_group(g);
@@ -514,7 +514,33 @@ void handle_srtla_data(time_t ts) {
     }
     g->srt_sock = sock;
 
-    int ret = connect(sock, &srt_addr, addr_len);
+    // Set receive buffer size for g->srt_sock
+    int bufsize = RECV_BUF_SIZE;
+    int ret = setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+    if (ret != 0) {
+      spdlog::error("failed to set receive buffer size ({})", bufsize);
+      remove_group(g);
+      return;
+    }
+
+    // Set send buffer size for g->srt_sock
+    int sndbufsize = SEND_BUF_SIZE;
+    ret = setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &sndbufsize, sizeof(sndbufsize));
+    if (ret != 0) {
+      spdlog::error("failed to set send buffer size ({})", bufsize);
+      remove_group(g);
+      return;
+    }
+
+    // Set g->srt_sock to non-blocking
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags == -1 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+      spdlog::error("failed to set g->srt_sock non-blocking");
+      remove_group(g);
+      return;
+    }
+
+    ret = connect(sock, &srt_addr, addr_len);
     if (ret != 0) {
       spdlog::error("[Group: {}] Failed to connect() to the SRT socket", static_cast<void *>(g.get()));
       remove_group(g);
@@ -658,6 +684,22 @@ int resolve_srt_addr(const char *host, const char *port) {
   int tmp_sock = socket(AF_INET, SOCK_DGRAM, 0);
   if (tmp_sock < 0) {
     spdlog::error("Failed to create a UDP socket");
+    return -1;
+  }
+
+  // Set receive buffer size for tmp_sock
+  int bufsize = RECV_BUF_SIZE;
+  ret = setsockopt(tmp_sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+  if (ret != 0) {
+    spdlog::error("Failed to set a receive buffer size ({} bytes)", bufsize);
+    return -1;
+  }
+
+  // Set send buffer size for tmp_sock
+  bufsize = SEND_BUF_SIZE;
+  ret = setsockopt(tmp_sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+  if (ret != 0) {
+    spdlog::error("Failed to set a send buffer size ({} bytes)", bufsize);
     return -1;
   }
 
@@ -1127,11 +1169,26 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  // Set receive buffer size to 32MB
-  int rcv_buf = 32 * 1024 * 1024;
-  ret = setsockopt(srtla_sock, SOL_SOCKET, SO_RCVBUF, &rcv_buf, sizeof(rcv_buf));
-  if (ret < 0) {
-    spdlog::critical("Failed to set SRTLA socket receive buffer size");
+  // Set receive buffer size for srtla_sock
+  int bufsize = RECV_BUF_SIZE;
+  ret = setsockopt(srtla_sock, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
+  if (ret != 0) {
+    spdlog::error("failed to set receive buffer size ({})", bufsize);
+    exit(EXIT_FAILURE);
+  }
+
+  // Set send buffer size for srtla_sock
+  bufsize = SEND_BUF_SIZE;
+  ret = setsockopt(srtla_sock, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
+  if (ret != 0) {
+    spdlog::error("failed to set send buffer size ({})", bufsize);
+    exit(EXIT_FAILURE);
+  }
+
+  // Set srtla_sock to non-blocking
+  int flags = fcntl(srtla_sock, F_GETFL, 0);
+  if (flags == -1 || fcntl(srtla_sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+    spdlog::error("failed to set srtla_sock non-blocking");
     exit(EXIT_FAILURE);
   }
 
