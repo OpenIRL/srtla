@@ -55,8 +55,8 @@ extern "C" {
 
 #define RECV_ACK_INT 10
 
-#define SEND_BUF_SIZE (32 * 1024 * 1024)
-#define RECV_BUF_SIZE (32 * 1024 * 1024)
+#define SEND_BUF_SIZE (100 * 1024 * 1024)
+#define RECV_BUF_SIZE (100 * 1024 * 1024)
 
 #define SRT_SOCKET_INFO_PREFIX "/tmp/srtla-group-"
 
