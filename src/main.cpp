@@ -350,13 +350,13 @@ void handle_srt_data(srtla_conn_group_ptr g) {
     return;
   }
 
-  // ACK
-  if (is_srt_ack(buf, n)) {
-    // Broadcast SRT ACKs over all connections for timely delivery
+  // Broadcast SRT ACKs and NAKs over all connections for timely delivery
+  if (is_srt_ack(buf, n) || is_srt_nak(buf, n)) {
     for (auto &conn : g->conns) {
       int ret = sendto(srtla_sock, &buf, n, 0, &conn->addr, addr_len);
-      if (ret != n)
-        spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT ack", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
+      if (ret != n) {
+        spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
+      }
     }
   } else {
     // send other packets over the most recently used SRTLA connection
@@ -412,13 +412,6 @@ void register_packet(srtla_conn_group_ptr group, srtla_conn_ptr conn, int32_t sn
 
     conn->recv_idx = 0;
   }
-}
-
-// Add this function for detecting NAK packets
-bool is_srt_nak(void *pkt, int n) {
-  if (n < sizeof(srt_header_t)) return false;
-  uint16_t type = get_srt_type(pkt, n);
-  return type == SRT_TYPE_NAK;
 }
 
 void handle_srtla_data(time_t ts) {

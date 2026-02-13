@@ -122,7 +122,6 @@ struct srtla_ack_pkt {
 
 void send_keepalive(srtla_conn_ptr c, time_t ts);
 bool conn_timed_out(srtla_conn_ptr c, time_t ts);
-bool is_srt_nak(void *pkt, int n);
 
 struct conn_bandwidth_info {
     srtla_conn_ptr conn;
