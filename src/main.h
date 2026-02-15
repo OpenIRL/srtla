@@ -35,16 +35,15 @@ extern "C" {
 #define GROUP_TIMEOUT  4
 #define CONN_TIMEOUT   4
 
-// Adjustment for Problem 1: Shorter keepalive period for recovery
 #define KEEPALIVE_PERIOD 1
 #define RECOVERY_CHANCE_PERIOD 5
 
-// Adjustment for Problem 2: Constants for connection quality evaluation
-#define CONN_QUALITY_EVAL_PERIOD 5 // Shorter interval for better responsiveness
+// Constants for connection quality evaluation
+#define CONN_QUALITY_EVAL_PERIOD 5 // Evaluation interval in seconds
 #define ACK_THROTTLE_INTERVAL 100  // Milliseconds between ACK packets for client control
 #define MIN_ACK_RATE 0.2           // Minimum ACK rate (20%) to keep connections alive
-#define MIN_ACCEPTABLE_TOTAL_BANDWIDTH_KBPS 1000.0 // Minimum total bandwidth for acceptable streaming quality (1 Mbps)
-#define GOOD_CONNECTION_THRESHOLD 0.5 // Threshold for considering a connection "good" (50% of max bandwidth)
+#define MIN_ACCEPTABLE_TOTAL_BANDWIDTH_KBPS 1000.0 // Minimum total bandwidth (1 Mbps)
+#define GOOD_CONNECTION_THRESHOLD 0.5 // Threshold for "good" connection (50% of max bandwidth)
 #define CONNECTION_GRACE_PERIOD 10 // Grace period in seconds before applying penalties
 #define WEIGHT_FULL 100
 #define WEIGHT_EXCELLENT 85
@@ -54,7 +53,6 @@ extern "C" {
 #define WEIGHT_CRITICAL 10
 
 #define RECV_ACK_INT 10
-
 #define SEND_BUF_SIZE (100 * 1024 * 1024)
 #define RECV_BUF_SIZE (100 * 1024 * 1024)
 
@@ -63,16 +61,19 @@ extern "C" {
 struct connection_stats {
     uint64_t bytes_received;         // Received bytes
     uint64_t packets_received;       // Received packets
-    uint32_t packets_lost;           // Lost packets (NAKs)
-    uint64_t last_eval_time;         // Last evaluation time
+    uint32_t bitrate;                // Current bandwidth in kbps (updated every 1s)
+    uint64_t last_bw_calc_bytes;     // Bytes at last bandwidth calculation
+    uint64_t last_bw_calc_time;      // Timestamp of last bandwidth calculation (ms)
+    uint32_t jitter;                 // Smoothed jitter in microseconds (RFC 3550 EWMA)
+    uint32_t last_srt_timestamp;     // Last SRT sender timestamp (microseconds)
+    uint64_t last_arrival_us;        // Last packet arrival time (microseconds, monotonic)
+    // Quality evaluation fields
+    uint64_t last_eval_time;         // Last evaluation time (ms)
     uint64_t last_bytes_received;    // Bytes at last evaluation point
-    uint64_t last_packets_received;  // Packets at last evaluation point
-    uint32_t last_packets_lost;      // Lost packets at last evaluation point
     uint32_t error_points;           // Error points
     uint8_t weight_percent;          // Weight in percent (0-100)
-    uint64_t last_ack_sent_time;     // Timestamp of last ACK packet
+    uint64_t last_ack_sent_time;     // Timestamp of last ACK packet (ms)
     double ack_throttle_factor;      // Factor for throttling ACK frequency (0.1-1.0)
-    uint16_t nack_count;             // Number of NAKs in last period
 };
 
 struct srtla_conn {
@@ -96,7 +97,11 @@ struct srtla_conn_group {
     time_t created_at = 0;
     int srt_sock = -1;
     struct sockaddr last_addr = {};
-    
+
+    // Fields for SRTLA stats reporting
+    uint32_t srt_dest_socket_id = 0;     // SRT destination socket ID (learned from forwarded packets)
+    uint64_t last_stats_sent_ms = 0;     // Timestamp of last stats packet sent (ms)
+
     // Fields for load balancing
     uint64_t total_target_bandwidth = 0; // Total bandwidth
     time_t last_quality_eval = 0;        // Last time of quality evaluation
@@ -108,7 +113,8 @@ struct srtla_conn_group {
     std::vector<struct sockaddr> get_client_addresses();
     void write_socket_info_file();
     void remove_socket_info_file();
-    
+    void send_stats_to_srt();
+
     // Methods for load balancing and connection evaluation
     void evaluate_connection_quality(time_t current_time);
     void adjust_connection_weights(time_t current_time);
@@ -126,5 +132,4 @@ bool conn_timed_out(srtla_conn_ptr c, time_t ts);
 struct conn_bandwidth_info {
     srtla_conn_ptr conn;
     double bandwidth_kbits_per_sec;
-    double packet_loss_ratio;
 };
