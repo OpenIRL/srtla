@@ -150,16 +150,12 @@ srtla_conn::srtla_conn(struct sockaddr &_addr, time_t ts) :
   // Initialize statistics
   stats.bytes_received = 0;
   stats.packets_received = 0;
-  stats.packets_lost = 0;
   stats.last_eval_time = 0;
   stats.last_bytes_received = 0;
-  stats.last_packets_received = 0;
-  stats.last_packets_lost = 0;
   stats.error_points = 0;
   stats.weight_percent = WEIGHT_FULL; // Start with full weight
   stats.last_ack_sent_time = 0;
   stats.ack_throttle_factor = 1.0;  // Start without throttling
-  stats.nack_count = 0;
   
   recovery_start = 0;
   connection_start = ts;
@@ -477,21 +473,6 @@ void handle_srtla_data(time_t ts) {
   c->stats.bytes_received += n;
   c->stats.packets_received++;
   
-  // Check for NAK packets to track packet loss
-  if (is_srt_nak(buf, n)) {
-    c->stats.packets_lost++;
-    c->stats.nack_count++;
-    
-    spdlog::debug("[{}:{}] [Group: {}] Received NAK packet. Total NAKs: {}, Total loss: {}", 
-                 print_addr(&c->addr), port_no(&c->addr), static_cast<void *>(g.get()),
-                 c->stats.nack_count, c->stats.packets_lost);
-    
-    // For high NAK rates, re-evaluate connection quality immediately
-    if (c->stats.nack_count > 5 && (g->last_quality_eval + 1) < ts) {
-      g->evaluate_connection_quality(ts);
-    }
-  }
-
   // Keep track of the received data packets to send SRTLA ACKs
   int32_t sn = get_srt_sn(buf, n);
   if (sn >= 0) {
@@ -767,24 +748,16 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
         if (time_diff_ms > 0) {
             // Calculate metrics from the last period
             uint64_t bytes_diff = conn->stats.bytes_received - conn->stats.last_bytes_received;
-            uint64_t packets_diff = conn->stats.packets_received - conn->stats.last_packets_received;
-            uint32_t lost_diff = conn->stats.packets_lost - conn->stats.last_packets_lost;
-            
+
             // Calculate bandwidth in bytes/sec
             double seconds = static_cast<double>(time_diff_ms) / 1000.0;
             double bandwidth_bytes_per_sec = bytes_diff / seconds;
 
             // Calculate bandwidth in kbits/sec for more intuitive evaluation
             double bandwidth_kbits_per_sec = (bandwidth_bytes_per_sec * 8.0) / 1000.0;
-            
-            // Calculate packet loss ratio
-            double packet_loss_ratio = 0;
-            if (packets_diff > 0) {
-                packet_loss_ratio = static_cast<double>(lost_diff) / (packets_diff + lost_diff);
-            }
-            
+
             // Store bandwidth info for this connection
-            bandwidth_info.push_back({conn, bandwidth_kbits_per_sec, packet_loss_ratio});
+            bandwidth_info.push_back({conn, bandwidth_kbits_per_sec});
 
             // Update total bandwidth
             total_target_bandwidth += static_cast<uint64_t>(bandwidth_bytes_per_sec);
@@ -792,8 +765,6 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
 
         // Store current values for next evaluation
         conn->stats.last_bytes_received = conn->stats.bytes_received;
-        conn->stats.last_packets_received = conn->stats.packets_received;
-        conn->stats.last_packets_lost = conn->stats.packets_lost;
         conn->stats.last_eval_time = current_ms;
     }
 
@@ -865,8 +836,6 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
     for (auto &info : bandwidth_info) {
         auto conn = info.conn;
         double bandwidth_kbits_per_sec = info.bandwidth_kbits_per_sec;
-        double packet_loss_ratio = info.packet_loss_ratio;
-
         // Check if connection is still in grace period
         bool in_grace_period = (current_time - conn->connection_start) < CONNECTION_GRACE_PERIOD;
 
@@ -876,9 +845,9 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
                          CONNECTION_GRACE_PERIOD - (current_time - conn->connection_start));
 
             // During grace period, only log statistics but don't apply penalties
-            spdlog::debug("  [{}:{}] [Group: {}] Connection stats (grace period): BW: {:.2f} kbits/s, Loss: {:.2f}%, Error points: {}",
+            spdlog::debug("  [{}:{}] [Group: {}] Connection stats (grace period): BW: {:.2f} kbits/s, Error points: {}",
                     print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
-                    bandwidth_kbits_per_sec, packet_loss_ratio * 100, conn->stats.error_points);
+                    bandwidth_kbits_per_sec, conn->stats.error_points);
             continue;
         }
 
@@ -927,20 +896,6 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
                      print_addr(&conn->addr), port_no(&conn->addr), performance_ratio,
                      bandwidth_kbits_per_sec, expected_kbits_per_sec);
 
-        // Packet loss evaluation
-            if (packet_loss_ratio > 0.20) { // > 20% loss
-                conn->stats.error_points += 40;
-            } else if (packet_loss_ratio > 0.10) { // > 10% loss
-                conn->stats.error_points += 20;
-            } else if (packet_loss_ratio > 0.05) { // > 5% loss
-                conn->stats.error_points += 10;
-            } else if (packet_loss_ratio > 0.01) { // > 1% loss
-                conn->stats.error_points += 5;
-            }
-
-        // Reset NAK count
-        conn->stats.nack_count = 0;
-
         // For logging, use a more meaningful percentage calculation
         // For poor connections, show percentage relative to median instead of minimum threshold
         double log_percentage;
@@ -952,11 +907,11 @@ void srtla_conn_group::evaluate_connection_quality(time_t current_time) {
             log_percentage = (bandwidth_kbits_per_sec / expected_kbits_per_sec) * 100;
         }
         
-        spdlog::debug("  [{}:{}] [Group: {}] Connection stats: BW: {:.2f} kbits/s ({:.2f}% of {}), Loss: {:.2f}%, Error points: {}",
+        spdlog::debug("  [{}:{}] [Group: {}] Connection stats: BW: {:.2f} kbits/s ({:.2f}% of {}), Error points: {}",
                 print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(this),
-                bandwidth_kbits_per_sec, log_percentage, 
-                is_poor_connection ? "median (poor conn)" : "expected", 
-                packet_loss_ratio * 100, conn->stats.error_points);
+                bandwidth_kbits_per_sec, log_percentage,
+                is_poor_connection ? "median (poor conn)" : "expected",
+                conn->stats.error_points);
     }
     
     // Adjust connection weights based on error points
@@ -1072,14 +1027,13 @@ void srtla_conn_group::adjust_connection_weights(time_t current_time) {
         
         for (auto &conn : conns) {
             spdlog::info("  [{}:{}] Weight: {}%, Throttle: {:.2f}, Error points: {}, "
-                        "Bandwidth: {} bytes, Packets: {}, Loss: {}",
+                        "Bandwidth: {} bytes, Packets: {}",
                         print_addr(&conn->addr), port_no(&conn->addr),
                         conn->stats.weight_percent,
                         conn->stats.ack_throttle_factor,
                         conn->stats.error_points,
                         conn->stats.bytes_received,
-                        conn->stats.packets_received,
-                        conn->stats.packets_lost);
+                        conn->stats.packets_received);
         }
     } else {
         spdlog::debug("[Group: {}] No weight or throttle adjustments needed", static_cast<void *>(this));

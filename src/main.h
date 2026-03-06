@@ -63,16 +63,12 @@ extern "C" {
 struct connection_stats {
     uint64_t bytes_received;         // Received bytes
     uint64_t packets_received;       // Received packets
-    uint32_t packets_lost;           // Lost packets (NAKs)
     uint64_t last_eval_time;         // Last evaluation time
     uint64_t last_bytes_received;    // Bytes at last evaluation point
-    uint64_t last_packets_received;  // Packets at last evaluation point
-    uint32_t last_packets_lost;      // Lost packets at last evaluation point
     uint32_t error_points;           // Error points
     uint8_t weight_percent;          // Weight in percent (0-100)
     uint64_t last_ack_sent_time;     // Timestamp of last ACK packet
     double ack_throttle_factor;      // Factor for throttling ACK frequency (0.1-1.0)
-    uint16_t nack_count;             // Number of NAKs in last period
 };
 
 struct srtla_conn {
@@ -126,5 +122,4 @@ bool conn_timed_out(srtla_conn_ptr c, time_t ts);
 struct conn_bandwidth_info {
     srtla_conn_ptr conn;
     double bandwidth_kbits_per_sec;
-    double packet_loss_ratio;
 };
