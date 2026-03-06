@@ -194,15 +194,32 @@ srtla_conn_group::srtla_conn_group(char *client_id, time_t ts) :
   std::copy(server_id.begin(), server_id.end(), id.begin() + (SRTLA_ID_LEN / 2));
 }
 
+void srtla_conn_group::close_srt_socket()
+{
+  if (srt_sock < 0)
+    return;
+
+  // Send SRT SHUTDOWN to cleanly end the session on the SRT server
+  if (srt_dest_socket_id != 0) {
+    srt_header_t shutdown_pkt = {};
+    shutdown_pkt.type = htobe16(SRT_TYPE_SHUTDOWN);
+    shutdown_pkt.dest_id = htonl(srt_dest_socket_id);
+    send(srt_sock, &shutdown_pkt, sizeof(shutdown_pkt), 0);
+    spdlog::info("[Group: {}] Sent SRT SHUTDOWN to backend", static_cast<void *>(this));
+  }
+
+  remove_socket_info_file();
+  epoll_rem(srt_sock);
+  close(srt_sock);
+  srt_sock = -1;
+  srt_dest_socket_id = 0;
+  last_stats_sent_ms = 0;
+}
+
 srtla_conn_group::~srtla_conn_group()
 {
   conns.clear();
-
-  if (srt_sock > 0) {
-    remove_socket_info_file();
-    epoll_rem(srt_sock);
-    close(srt_sock);
-  }
+  close_srt_socket();
 }
 
 std::vector<struct sockaddr> srtla_conn_group::get_client_addresses()
@@ -530,6 +547,14 @@ void handle_srtla_data(time_t ts) {
     }
 
     register_packet(g, c, sn);
+  }
+
+  // Detect encoder reconnection: SRT INDUCTION handshake on a group
+  // that already has an established SRT session
+  if (g->srt_sock >= 0 && is_srt_induction(buf, n)) {
+    spdlog::info("[Group: {}] Detected SRT INDUCTION on established session, resetting SRT socket",
+                 static_cast<void *>(g.get()));
+    g->close_srt_socket();
   }
 
   // Open a connection to the SRT server for the group

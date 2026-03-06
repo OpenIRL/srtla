@@ -88,6 +88,7 @@ uint16_t get_srt_type(void *pkt, int n);
 int is_srt_ack(void *pkt, int n);
 int is_srt_nak(void *pkt, int n);
 int is_srt_shutdown(void *pkt, int n);
+int is_srt_induction(void *pkt, int n);
 
 int is_srtla_keepalive(void *pkt, int len);
 int is_srtla_reg1(void *pkt, int len);

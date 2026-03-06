@@ -111,6 +111,7 @@ struct srtla_conn_group {
 
     srtla_conn_group(char *client_id, time_t ts);
     ~srtla_conn_group();
+  void close_srt_socket();
 
     std::vector<struct sockaddr> get_client_addresses();
     void write_socket_info_file();

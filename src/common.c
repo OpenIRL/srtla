@@ -98,6 +98,17 @@ int is_srt_nak(void *pkt, int n) {
   return get_srt_type(pkt, n) == SRT_TYPE_NAK;
 }
 
+int is_srt_shutdown(void *pkt, int n) {
+  return get_srt_type(pkt, n) == SRT_TYPE_SHUTDOWN;
+}
+
+int is_srt_induction(void *pkt, int n) {
+  if (n < (int)sizeof(srt_handshake_t)) return 0;
+  if (get_srt_type(pkt, n) != SRT_TYPE_HANDSHAKE) return 0;
+  srt_handshake_t *hs = (srt_handshake_t *)pkt;
+  return be32toh(hs->handshake_type) == 1;
+}
+
 int is_srtla_keepalive(void *pkt, int n) {
   return get_srt_type(pkt, n) == SRTLA_TYPE_KEEPALIVE;
 }
