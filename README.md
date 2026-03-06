@@ -204,6 +204,6 @@ This project is licensed under the [GNU Affero General Public License v3.0](LICE
 
 - Copyright (C) 2020-2021 BELABOX project
 - Copyright (C) 2024 IRLToolkit Inc.
-- Copyright (C) 2024 OpenIRL
+- Copyright (C) 2024-2026 OpenIRL
 
 You can use, modify, and distribute this code according to the terms of the AGPL-3.0.
