@@ -141,12 +141,25 @@ void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_c
   rc = nullptr;
 }
 
+/*
+  FNV-1a hash for generating anonymous connection IDs from IP:port
+*/
+static uint32_t fnv1a_hash(const void *data, size_t len) {
+  uint32_t hash = 0x811c9dc5;
+  const uint8_t *bytes = static_cast<const uint8_t *>(data);
+  for (size_t i = 0; i < len; i++) {
+    hash ^= bytes[i];
+    hash *= 0x01000193;
+  }
+  return hash;
+}
+
 srtla_conn::srtla_conn(struct sockaddr &_addr, time_t ts) :
   addr(_addr),
   last_rcvd(ts)
 {
   recv_log.fill(0);
-  
+
   // Initialize statistics
   stats.bytes_received = 0;
   stats.packets_received = 0;
@@ -156,7 +169,14 @@ srtla_conn::srtla_conn(struct sockaddr &_addr, time_t ts) :
   stats.weight_percent = WEIGHT_FULL; // Start with full weight
   stats.last_ack_sent_time = 0;
   stats.ack_throttle_factor = 1.0;  // Start without throttling
-  
+
+  // Connection ID: FNV-1a hash of sin_addr + sin_port
+  struct sockaddr_in *sin = reinterpret_cast<struct sockaddr_in *>(&addr);
+  uint8_t hash_input[6]; // 4 bytes addr + 2 bytes port
+  memcpy(hash_input, &sin->sin_addr.s_addr, 4);
+  memcpy(hash_input + 4, &sin->sin_port, 2);
+  stats.conn_id = fnv1a_hash(hash_input, sizeof(hash_input));
+
   recovery_start = 0;
   connection_start = ts;
 }
@@ -569,10 +589,99 @@ void handle_srtla_data(time_t ts) {
     g->write_socket_info_file();
   }
 
+  // Learn SRT destination socket ID from forwarded packets
+  if (g->srt_dest_socket_id == 0 && n >= SRT_MIN_LEN) {
+    srt_header_t *hdr = reinterpret_cast<srt_header_t *>(buf);
+    uint32_t dest_id = ntohl(hdr->dest_id);
+    if (dest_id != 0) {
+      g->srt_dest_socket_id = dest_id;
+      spdlog::debug("[Group: {}] Learned SRT destination socket ID: {:#x}", static_cast<void *>(g.get()), dest_id);
+    }
+  }
+
   int ret = send(g->srt_sock, &buf, n, 0);
   if (ret != n) {
     spdlog::error("[Group: {}] Failed to forward SRTLA packet, terminating the group", static_cast<void *>(g.get()));
     remove_group(g);
+  }
+}
+
+/*
+  Send SRTLA per-connection stats to the SRT server as a custom control packet.
+  Called from the main loop for each group, throttled to once per second.
+*/
+void srtla_conn_group::send_stats_to_srt() {
+  // Guards: need socket ID, valid socket, and at least one connection
+  if (srt_dest_socket_id == 0 || srt_sock < 0 || conns.empty())
+    return;
+
+  uint64_t now_ms = 0;
+  if (get_ms(&now_ms) != 0)
+    return;
+
+  // Throttle to once per second
+  if (last_stats_sent_ms > 0 && (now_ms - last_stats_sent_ms) < 1000)
+    return;
+
+  last_stats_sent_ms = now_ms;
+
+  uint8_t num_peers = static_cast<uint8_t>(std::min(conns.size(), static_cast<size_t>(16)));
+
+  // Calculate total bandwidth and per-connection bandwidth (1s delta)
+  uint32_t total_bw_kbps = 0;
+  for (auto &conn : conns) {
+    if (conn->stats.last_bw_calc_time > 0) {
+      uint64_t delta_ms = now_ms - conn->stats.last_bw_calc_time;
+      if (delta_ms > 0) {
+        uint64_t bytes_diff = conn->stats.bytes_received - conn->stats.last_bw_calc_bytes;
+        conn->stats.bitrate = static_cast<uint32_t>((bytes_diff * 8) / delta_ms);
+      }
+    }
+    conn->stats.last_bw_calc_bytes = conn->stats.bytes_received;
+    conn->stats.last_bw_calc_time = now_ms;
+    total_bw_kbps += conn->stats.bitrate;
+  }
+
+  // Build packet: SRT header (4 words) + Stats header (4 words) + Per-peer (6 words each)
+  // Max: 4 + 4 + 16*6 = 104 words = 416 bytes
+  uint32_t buf[4 + 4 + 16 * 6];
+  memset(buf, 0, sizeof(buf));
+
+  // SRT Control Packet Header (16 bytes, network byte order)
+  buf[0] = htobe32(static_cast<uint32_t>(SRTLA_TYPE_STATS) << 16); // Control bit + Type
+  buf[1] = htobe32(0);               // Reserved
+  buf[2] = htobe32(0);               // Timestamp
+  buf[3] = htobe32(srt_dest_socket_id);
+
+  // Stats Header (16 bytes)
+  uint32_t word0 = (static_cast<uint32_t>(1) << 24) |             // version = 1
+                   (static_cast<uint32_t>(num_peers) << 16);       // num_peers
+  buf[4] = htobe32(word0);
+  buf[5] = htobe32(total_bw_kbps);
+  buf[6] = htobe32(static_cast<uint32_t>(now_ms >> 32));           // timestamp_high
+  buf[7] = htobe32(static_cast<uint32_t>(now_ms & 0xFFFFFFFF));   // timestamp_low
+
+  // Per-Peer entries (16 bytes each)
+  for (uint8_t i = 0; i < num_peers; i++) {
+    auto &conn = conns[i];
+
+    uint32_t uptime_s = (conn->connection_start > 0) ?
+        static_cast<uint32_t>(now_ms / 1000 - conn->connection_start) : 0;
+
+    buf[8 + i * 6 + 0] = htobe32(conn->stats.conn_id);
+    buf[8 + i * 6 + 1] = htobe32(conn->stats.bitrate);
+    buf[8 + i * 6 + 2] = htobe32(conn->stats.jitter);
+    buf[8 + i * 6 + 3] = htobe32(static_cast<uint32_t>(conn->stats.bytes_received >> 32));
+    buf[8 + i * 6 + 4] = htobe32(static_cast<uint32_t>(conn->stats.bytes_received & 0xFFFFFFFF));
+    buf[8 + i * 6 + 5] = htobe32(uptime_s);
+  }
+
+  size_t pkt_size = (4 + 4 + num_peers * 6) * sizeof(uint32_t);
+  int ret = send(srt_sock, buf, pkt_size, 0);
+  if (ret < 0) {
+    spdlog::debug("[Group: {}] Failed to send SRTLA stats packet: {}", static_cast<void *>(this), strerror(errno));
+  } else {
+    spdlog::debug("[Group: {}] Sent SRTLA stats packet ({} peers, {} kbps total)", static_cast<void *>(this), num_peers, total_bw_kbps);
   }
 }
 
@@ -1217,6 +1326,11 @@ int main(int argc, char **argv) {
       if (conn_groups.size() < group_cnt)
         break;
     } // for
+
+    // Send SRTLA stats to SRT server for each group (throttled internally to 1/s)
+    for (auto &g : conn_groups) {
+      g->send_stats_to_srt();
+    }
 
     cleanup_groups_connections(ts);
   }

@@ -63,9 +63,13 @@ extern "C" {
 struct connection_stats {
     uint64_t bytes_received;         // Received bytes
     uint64_t packets_received;       // Received packets
+    uint32_t bitrate;                // Current bandwidth in kbps (updated every 1s)
+    uint64_t last_bw_calc_bytes;     // Bytes at last bandwidth calculation
+    uint64_t last_bw_calc_time;      // Timestamp of last bandwidth calculation (ms)
     uint32_t jitter;                 // Smoothed jitter in microseconds (RFC 3550 EWMA)
     uint32_t last_srt_timestamp;     // Last SRT sender timestamp (microseconds)
     uint64_t last_arrival_us;        // Last packet arrival time (microseconds, monotonic)
+    uint32_t conn_id;                // Anonymous connection ID (FNV-1a hash of IP:port)
     uint64_t last_eval_time;         // Last evaluation time
     uint64_t last_bytes_received;    // Bytes at last evaluation point
     uint32_t error_points;           // Error points
@@ -95,7 +99,11 @@ struct srtla_conn_group {
     time_t created_at = 0;
     int srt_sock = -1;
     struct sockaddr last_addr = {};
-    
+
+    // Fields for SRTLA stats reporting
+    uint32_t srt_dest_socket_id = 0;     // SRT destination socket ID (learned from forwarded packets)
+    uint64_t last_stats_sent_ms = 0;     // Timestamp of last stats packet sent (ms)
+
     // Fields for load balancing
     uint64_t total_target_bandwidth = 0; // Total bandwidth
     time_t last_quality_eval = 0;        // Last time of quality evaluation
@@ -107,7 +115,8 @@ struct srtla_conn_group {
     std::vector<struct sockaddr> get_client_addresses();
     void write_socket_info_file();
     void remove_socket_info_file();
-    
+    void send_stats_to_srt();
+
     // Methods for load balancing and connection evaluation
     void evaluate_connection_quality(time_t current_time);
     void adjust_connection_weights(time_t current_time);
