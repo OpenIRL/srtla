@@ -63,6 +63,9 @@ extern "C" {
 struct connection_stats {
     uint64_t bytes_received;         // Received bytes
     uint64_t packets_received;       // Received packets
+    uint32_t jitter;                 // Smoothed jitter in microseconds (RFC 3550 EWMA)
+    uint32_t last_srt_timestamp;     // Last SRT sender timestamp (microseconds)
+    uint64_t last_arrival_us;        // Last packet arrival time (microseconds, monotonic)
     uint64_t last_eval_time;         // Last evaluation time
     uint64_t last_bytes_received;    // Bytes at last evaluation point
     uint32_t error_points;           // Error points

@@ -476,6 +476,39 @@ void handle_srtla_data(time_t ts) {
   // Keep track of the received data packets to send SRTLA ACKs
   int32_t sn = get_srt_sn(buf, n);
   if (sn >= 0) {
+    // Calculate per-connection jitter from SRT sender timestamps (RFC 3550)
+    // Only for in-order packets — out-of-order arrivals (common with SRTLA
+    // multi-path) would produce bogus values from the unsigned timestamp diff
+    uint32_t srt_ts = be32toh(reinterpret_cast<uint32_t *>(buf)[2]);
+    uint64_t arrival_us;
+    struct timespec tp;
+    clock_gettime(CLOCK_MONOTONIC, &tp);
+    arrival_us = static_cast<uint64_t>(tp.tv_sec) * 1000000 + tp.tv_nsec / 1000;
+
+    if (c->stats.last_arrival_us > 0) {
+      int32_t ts_diff = static_cast<int32_t>(srt_ts - c->stats.last_srt_timestamp);
+      if (ts_diff > 0) {
+        // In-order packet: update jitter and reference timestamps
+        int64_t d = static_cast<int64_t>(arrival_us - c->stats.last_arrival_us)
+                  - static_cast<int64_t>(ts_diff);
+        if (d < 0) d = -d;
+        // Clamp to 1 second to prevent overflow in EWMA calculation
+        if (d > 1000000) d = 1000000;
+        // RFC 3550 EWMA: J(i) = J(i-1) + (|D(i-1,i)| - J(i-1)) / 16
+        int32_t jdiff = static_cast<int32_t>(d) - static_cast<int32_t>(c->stats.jitter);
+        c->stats.jitter = static_cast<uint32_t>(static_cast<int32_t>(c->stats.jitter) + jdiff / 16);
+
+        c->stats.last_srt_timestamp = srt_ts;
+        c->stats.last_arrival_us = arrival_us;
+      }
+      // ts_diff == 0: duplicate packet, ts_diff < 0: out-of-order
+      // In both cases, skip jitter update and keep reference point stable
+    } else {
+      // First data packet on this connection: initialize reference
+      c->stats.last_srt_timestamp = srt_ts;
+      c->stats.last_arrival_us = arrival_us;
+    }
+
     register_packet(g, c, sn);
   }
 
