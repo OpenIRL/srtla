@@ -47,6 +47,17 @@ int srtla_sock;
 struct sockaddr srt_addr;
 const socklen_t addr_len = sizeof(struct sockaddr);
 
+/* Pad small sendto() to 32 bytes to avoid carrier NAT drops on 2-byte packets */
+static inline int pad_sendto(int sock, const void *buf, size_t len,
+                             int flags, const struct sockaddr *addr, socklen_t alen) {
+  unsigned char padded[32];
+  if (len >= 32) return sendto(sock, buf, len, flags, addr, alen);
+  memset(padded, 0, 32);
+  memcpy(padded, buf, len);
+  int ret = sendto(sock, padded, 32, flags, addr, alen);
+  return (ret == 32) ? (int)len : ret;
+}
+
 std::vector<srtla_conn_group_ptr> conn_groups;
 
 /*
@@ -108,7 +119,7 @@ uint16_t get_sock_local_port(int fd)
 inline void srtla_send_reg_err(struct sockaddr *addr)
 {
   uint16_t header = htobe16(SRTLA_TYPE_REG_ERR);
-  sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
+  pad_sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
 }
 
 /*
@@ -318,7 +329,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   srtla_conn_group_ptr group = group_find_by_id(id);
   if (!group) {
     uint16_t header = htobe16(SRTLA_TYPE_REG_NGP);
-    sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
+    pad_sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
     spdlog::error("[{}:{}] Connection registration failed: No group found", print_addr(addr), port_no(addr));
     return -1;
   }
@@ -349,7 +360,7 @@ int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
   }
 
   uint16_t header = htobe16(SRTLA_TYPE_REG3);
-  int ret = sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
+  int ret = pad_sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
   if (ret != sizeof(header)) {
     spdlog::error("[{}:{}] [Group: {}] Connection registration failed: Socket send error", print_addr(addr), port_no(addr), static_cast<void *>(group.get()));
     return -1;
@@ -493,7 +504,7 @@ void handle_srtla_data(time_t ts) {
 
   // Resend SRTLA keep-alive packets to the sender
   if (is_srtla_keepalive(buf, n)) {
-    int ret = sendto(srtla_sock, &buf, n, 0, &srtla_addr, addr_len);
+    int ret = pad_sendto(srtla_sock, &buf, n, 0, &srtla_addr, addr_len);
     if (ret != n) {
       spdlog::error("[{}:{}] [Group: {}] Failed to send SRTLA Keepalive", print_addr(&srtla_addr), port_no(&srtla_addr), static_cast<void *>(g.get()));
     }
@@ -1210,7 +1221,7 @@ void srtla_conn_group::adjust_connection_weights(time_t current_time) {
 // Implementation for Problem 1: Connections with Recovery
 void send_keepalive(srtla_conn_ptr c, time_t ts) {
     uint16_t pkt = htobe16(SRTLA_TYPE_KEEPALIVE);
-    int ret = sendto(srtla_sock, &pkt, sizeof(pkt), 0, &c->addr, addr_len);
+    int ret = pad_sendto(srtla_sock, &pkt, sizeof(pkt), 0, &c->addr, addr_len);
     
     if (ret != sizeof(pkt)) {
         spdlog::error("[{}:{}] Failed to send keepalive packet",
