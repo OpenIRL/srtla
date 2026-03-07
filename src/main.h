@@ -61,10 +61,15 @@ extern "C" {
 #define SRT_SOCKET_INFO_PREFIX "/tmp/srtla-group-"
 
 struct connection_stats {
-    uint64_t bytes_received;         // Received bytes
-    uint64_t packets_received;       // Received packets
-    uint32_t bitrate;                // Current bandwidth in kbps (updated every 1s)
-    uint64_t last_bw_calc_bytes;     // Bytes at last bandwidth calculation
+    uint64_t bytes_received;         // Total received bytes (including retransmissions)
+    uint64_t packets_received;       // Total received packets
+    uint64_t unique_data_bytes;      // Unique data bytes (excluding retransmissions)
+    uint64_t unique_data_packets;    // Unique data packets (excluding retransmissions)
+    uint32_t bitrate;                // Usable SRT payload bitrate in kbps (unique data, no headers)
+    uint32_t throughput;             // Total network throughput in kbps (including retransmissions)
+    uint64_t last_bw_calc_bytes;     // Total bytes at last bandwidth calculation
+    uint64_t last_bw_calc_unique;    // Unique bytes at last bandwidth calculation
+    uint64_t last_bw_calc_unique_pkts; // Unique packets at last bandwidth calculation
     uint64_t last_bw_calc_time;      // Timestamp of last bandwidth calculation (ms)
     uint32_t jitter;                 // Smoothed jitter in microseconds (RFC 3550 EWMA)
     uint32_t last_srt_timestamp;     // Last SRT sender timestamp (microseconds)
@@ -103,6 +108,13 @@ struct srtla_conn_group {
     // Fields for SRTLA stats reporting
     uint32_t srt_dest_socket_id = 0;     // SRT destination socket ID (learned from forwarded packets)
     uint64_t last_stats_sent_ms = 0;     // Timestamp of last stats packet sent (ms)
+
+    // Sequence number tracking for retransmission detection
+    static constexpr int32_t SN_WINDOW_SIZE = 65536;
+    std::vector<bool> sn_window;
+    int32_t sn_window_base = -1;
+    bool track_data_sn(int32_t sn);      // Returns true if SN is new (not a retransmission)
+    void reset_sn_tracking();
 
     // Fields for load balancing
     uint64_t total_target_bandwidth = 0; // Total bandwidth
