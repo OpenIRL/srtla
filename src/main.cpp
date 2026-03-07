@@ -566,6 +566,16 @@ void handle_srtla_data(time_t ts) {
     spdlog::info("[Group: {}] Detected SRT INDUCTION on established session, resetting SRT socket",
                  static_cast<void *>(g.get()));
     g->close_srt_socket();
+
+    // Reset connection stats to avoid stale timestamps from the old session
+    for (auto &conn : g->conns) {
+      uint32_t saved_conn_id = conn->stats.conn_id;
+      conn->stats = {};
+      conn->stats.conn_id = saved_conn_id;
+      conn->stats.weight_percent = WEIGHT_FULL;
+      conn->stats.ack_throttle_factor = 1.0;
+      conn->recovery_start = 0;
+    }
   }
 
   // Open a connection to the SRT server for the group
