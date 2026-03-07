@@ -227,6 +227,44 @@ void srtla_conn_group::close_srt_socket()
   last_stats_sent_ms = 0;
 }
 
+bool srtla_conn_group::track_data_sn(int32_t sn)
+{
+  if (sn_window_base < 0) {
+    sn_window.resize(SN_WINDOW_SIZE, false);
+    sn_window_base = sn;
+  }
+
+  int32_t offset = sn - sn_window_base;
+
+  // Before our window - old packet / retransmission
+  if (offset < 0) return false;
+
+  // Beyond window - advance
+  if (offset >= SN_WINDOW_SIZE) {
+    int32_t new_base = sn - SN_WINDOW_SIZE / 2;
+    int32_t advance = new_base - sn_window_base;
+    if (advance >= SN_WINDOW_SIZE) {
+      std::fill(sn_window.begin(), sn_window.end(), false);
+    } else {
+      for (int32_t i = 0; i < advance; i++) {
+        sn_window[(sn_window_base + i) & (SN_WINDOW_SIZE - 1)] = false;
+      }
+    }
+    sn_window_base = new_base;
+  }
+
+  int idx = sn & (SN_WINDOW_SIZE - 1);
+  if (sn_window[idx]) return false;
+  sn_window[idx] = true;
+  return true;
+}
+
+void srtla_conn_group::reset_sn_tracking()
+{
+  sn_window_base = -1;
+  sn_window.clear();
+}
+
 srtla_conn_group::~srtla_conn_group()
 {
   conns.clear();
@@ -524,6 +562,11 @@ void handle_srtla_data(time_t ts) {
   // Keep track of the received data packets to send SRTLA ACKs
   int32_t sn = get_srt_sn(buf, n);
   if (sn >= 0) {
+    // Track unique data bytes (excluding retransmissions)
+    if (g->track_data_sn(sn)) {
+      c->stats.unique_data_bytes += n;
+      c->stats.unique_data_packets++;
+    }
     // Calculate per-connection jitter from SRT sender timestamps (RFC 3550)
     // Only for in-order packets — out-of-order arrivals (common with SRTLA
     // multi-path) would produce bogus values from the unsigned timestamp diff
@@ -566,6 +609,7 @@ void handle_srtla_data(time_t ts) {
     spdlog::info("[Group: {}] Detected SRT INDUCTION on established session, resetting SRT socket",
                  static_cast<void *>(g.get()));
     g->close_srt_socket();
+    g->reset_sn_tracking();
 
     // Reset connection stats to avoid stale timestamps from the old session
     for (auto &conn : g->conns) {
@@ -673,24 +717,34 @@ void srtla_conn_group::send_stats_to_srt() {
 
   uint8_t num_peers = static_cast<uint8_t>(std::min(conns.size(), static_cast<size_t>(16)));
 
-  // Calculate total bandwidth and per-connection bandwidth (1s delta)
+  // Calculate per-connection bitrate (unique payload) and throughput (total network load)
   uint32_t total_bw_kbps = 0;
+  uint32_t total_throughput_kbps = 0;
   for (auto &conn : conns) {
     if (conn->stats.last_bw_calc_time > 0) {
       uint64_t delta_ms = now_ms - conn->stats.last_bw_calc_time;
       if (delta_ms > 0) {
+        // Bitrate: unique payload only (subtract 16-byte SRT header per packet)
+        uint64_t unique_bytes = conn->stats.unique_data_bytes - conn->stats.last_bw_calc_unique;
+        uint64_t unique_pkts = conn->stats.unique_data_packets - conn->stats.last_bw_calc_unique_pkts;
+        uint64_t payload_bytes = unique_bytes - unique_pkts * SRT_MIN_LEN;
+        conn->stats.bitrate = static_cast<uint32_t>((payload_bytes * 8) / delta_ms);
+        // Throughput: total bytes on the wire
         uint64_t bytes_diff = conn->stats.bytes_received - conn->stats.last_bw_calc_bytes;
-        conn->stats.bitrate = static_cast<uint32_t>((bytes_diff * 8) / delta_ms);
+        conn->stats.throughput = static_cast<uint32_t>((bytes_diff * 8) / delta_ms);
       }
     }
+    conn->stats.last_bw_calc_unique = conn->stats.unique_data_bytes;
+    conn->stats.last_bw_calc_unique_pkts = conn->stats.unique_data_packets;
     conn->stats.last_bw_calc_bytes = conn->stats.bytes_received;
     conn->stats.last_bw_calc_time = now_ms;
     total_bw_kbps += conn->stats.bitrate;
+    total_throughput_kbps += conn->stats.throughput;
   }
 
-  // Build packet: SRT header (4 words) + Stats header (4 words) + Per-peer (6 words each)
-  // Max: 4 + 4 + 16*6 = 104 words = 416 bytes
-  uint32_t buf[4 + 4 + 16 * 6];
+  // Build packet: SRT header (4 words) + Stats header (4 words) + Per-peer (7 words each)
+  // Max: 4 + 4 + 16*7 = 120 words = 480 bytes
+  uint32_t buf[4 + 4 + 16 * 7];
   memset(buf, 0, sizeof(buf));
 
   // SRT Control Packet Header (16 bytes, network byte order)
@@ -707,27 +761,29 @@ void srtla_conn_group::send_stats_to_srt() {
   buf[6] = htobe32(static_cast<uint32_t>(now_ms >> 32));           // timestamp_high
   buf[7] = htobe32(static_cast<uint32_t>(now_ms & 0xFFFFFFFF));   // timestamp_low
 
-  // Per-Peer entries (16 bytes each)
+  // Per-Peer entries (28 bytes each)
   for (uint8_t i = 0; i < num_peers; i++) {
     auto &conn = conns[i];
 
     uint32_t uptime_s = (conn->connection_start > 0) ?
         static_cast<uint32_t>(now_ms / 1000 - conn->connection_start) : 0;
 
-    buf[8 + i * 6 + 0] = htobe32(conn->stats.conn_id);
-    buf[8 + i * 6 + 1] = htobe32(conn->stats.bitrate);
-    buf[8 + i * 6 + 2] = htobe32(conn->stats.jitter);
-    buf[8 + i * 6 + 3] = htobe32(static_cast<uint32_t>(conn->stats.bytes_received >> 32));
-    buf[8 + i * 6 + 4] = htobe32(static_cast<uint32_t>(conn->stats.bytes_received & 0xFFFFFFFF));
-    buf[8 + i * 6 + 5] = htobe32(uptime_s);
+    buf[8 + i * 7 + 0] = htobe32(conn->stats.conn_id);
+    buf[8 + i * 7 + 1] = htobe32(conn->stats.bitrate);
+    buf[8 + i * 7 + 2] = htobe32(conn->stats.jitter);
+    buf[8 + i * 7 + 3] = htobe32(static_cast<uint32_t>(conn->stats.bytes_received >> 32));
+    buf[8 + i * 7 + 4] = htobe32(static_cast<uint32_t>(conn->stats.bytes_received & 0xFFFFFFFF));
+    buf[8 + i * 7 + 5] = htobe32(uptime_s);
+    buf[8 + i * 7 + 6] = htobe32(conn->stats.throughput);
   }
 
-  size_t pkt_size = (4 + 4 + num_peers * 6) * sizeof(uint32_t);
+  size_t pkt_size = (4 + 4 + num_peers * 7) * sizeof(uint32_t);
   int ret = send(srt_sock, buf, pkt_size, 0);
   if (ret < 0) {
     spdlog::debug("[Group: {}] Failed to send SRTLA stats packet: {}", static_cast<void *>(this), strerror(errno));
   } else {
-    spdlog::debug("[Group: {}] Sent SRTLA stats packet ({} peers, {} kbps total)", static_cast<void *>(this), num_peers, total_bw_kbps);
+    spdlog::debug("[Group: {}] Sent SRTLA stats packet ({} peers, {} kbps bitrate, {} kbps throughput)",
+                  static_cast<void *>(this), num_peers, total_bw_kbps, total_throughput_kbps);
   }
 }
 
