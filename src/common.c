@@ -98,6 +98,10 @@ int is_srt_nak(void *pkt, int n) {
   return get_srt_type(pkt, n) == SRT_TYPE_NAK;
 }
 
+int is_srt_handshake(void *pkt, int n) {
+  return get_srt_type(pkt, n) == SRT_TYPE_HANDSHAKE;
+}
+
 int is_srt_shutdown(void *pkt, int n) {
   return get_srt_type(pkt, n) == SRT_TYPE_SHUTDOWN;
 }

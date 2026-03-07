@@ -394,8 +394,8 @@ void handle_srt_data(srtla_conn_group_ptr g) {
     return;
   }
 
-  // Broadcast SRT ACKs and NAKs over all connections for timely delivery
-  if (is_srt_ack(buf, n) || is_srt_nak(buf, n)) {
+  // Broadcast SRT ACKs, NAKs, and handshakes over all connections for timely delivery
+  if (is_srt_ack(buf, n) || is_srt_nak(buf, n) || is_srt_handshake(buf, n)) {
     for (auto &conn : g->conns) {
       int ret = sendto(srtla_sock, &buf, n, 0, &conn->addr, addr_len);
       if (ret != n) {
