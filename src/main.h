@@ -39,20 +39,6 @@ extern "C" {
 #define KEEPALIVE_PERIOD 1
 #define RECOVERY_CHANCE_PERIOD 5
 
-// Adjustment for Problem 2: Constants for connection quality evaluation
-#define CONN_QUALITY_EVAL_PERIOD 5 // Shorter interval for better responsiveness
-#define ACK_THROTTLE_INTERVAL 100  // Milliseconds between ACK packets for client control
-#define MIN_ACK_RATE 0.2           // Minimum ACK rate (20%) to keep connections alive
-#define MIN_ACCEPTABLE_TOTAL_BANDWIDTH_KBPS 1000.0 // Minimum total bandwidth for acceptable streaming quality (1 Mbps)
-#define GOOD_CONNECTION_THRESHOLD 0.5 // Threshold for considering a connection "good" (50% of max bandwidth)
-#define CONNECTION_GRACE_PERIOD 10 // Grace period in seconds before applying penalties
-#define WEIGHT_FULL 100
-#define WEIGHT_EXCELLENT 85
-#define WEIGHT_DEGRADED 70
-#define WEIGHT_FAIR 55
-#define WEIGHT_POOR 40
-#define WEIGHT_CRITICAL 10
-
 #define RECV_ACK_INT 10
 
 #define SEND_BUF_SIZE (100 * 1024 * 1024)
@@ -75,12 +61,6 @@ struct connection_stats {
     uint32_t last_srt_timestamp;     // Last SRT sender timestamp (microseconds)
     uint64_t last_arrival_us;        // Last packet arrival time (microseconds, monotonic)
     uint32_t conn_id;                // Anonymous connection ID (FNV-1a hash of IP:port)
-    uint64_t last_eval_time;         // Last evaluation time
-    uint64_t last_bytes_received;    // Bytes at last evaluation point
-    uint32_t error_points;           // Error points
-    uint8_t weight_percent;          // Weight in percent (0-100)
-    uint64_t last_ack_sent_time;     // Timestamp of last ACK packet
-    double ack_throttle_factor;      // Factor for throttling ACK frequency (0.1-1.0)
 };
 
 struct srtla_conn {
@@ -120,11 +100,6 @@ struct srtla_conn_group {
     bool track_data_sn(int32_t sn);      // Returns true if SN is new (not a retransmission)
     void reset_sn_tracking();
 
-    // Fields for load balancing
-    uint64_t total_target_bandwidth = 0; // Total bandwidth
-    time_t last_quality_eval = 0;        // Last time of quality evaluation
-    bool load_balancing_enabled = true;  // Load balancing enabled
-
     srtla_conn_group(char *client_id, time_t ts);
     ~srtla_conn_group();
   void close_srt_socket();
@@ -133,10 +108,6 @@ struct srtla_conn_group {
     void write_socket_info_file();
     void remove_socket_info_file();
     void send_stats_to_srt();
-
-    // Methods for load balancing and connection evaluation
-    void evaluate_connection_quality(time_t current_time);
-    void adjust_connection_weights(time_t current_time);
 };
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
 
@@ -147,8 +118,3 @@ struct srtla_ack_pkt {
 
 void send_keepalive(srtla_conn_ptr c, time_t ts);
 bool conn_timed_out(srtla_conn_ptr c, time_t ts);
-
-struct conn_bandwidth_info {
-    srtla_conn_ptr conn;
-    double bandwidth_kbits_per_sec;
-};

@@ -2,7 +2,7 @@
 
 ## Overview
 
-srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to transport [SRT](https://github.com/Haivision/srt/) traffic over multiple network links for capacity aggregation and redundancy. Traffic is balanced dynamically depending on network conditions. The primary application is bonding mobile modems for live streaming.
+srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to transport [SRT](https://github.com/Haivision/srt/) traffic over multiple network links for capacity aggregation and redundancy. Traffic is balanced across the links by the SRTLA sender based on per-link feedback. The primary application is bonding mobile modems for live streaming.
 
 > **Note**: This is a fork of the original SRTLA implementation by BELABOX. The original server component (srtla_rec) was marked as unsupported by BELABOX.
 
@@ -12,7 +12,7 @@ srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to 
 - Automatic management of connection groups and individual connections
 - Robust error handling and timeouts for inactive connections
 - Logging of connection details for easy diagnostics
-- Improved load balancing through ACK throttling
+- Reliable forwarding of SRT ACK/NAK feedback over all links so the sender can balance traffic natively
 - Connection recovery mechanism for temporary network issues
 
 ## Requirements
@@ -94,76 +94,30 @@ SRTLA implements a protocol for packet transmission over multiple network connec
 
 5. **Connection Cleanup**: Inactive connections and groups are automatically cleaned up after a configurable timeout (default: 10 seconds).
 
-6. **Load Balancing through ACK Throttling**: The server controls ACK frequency to influence the client's connection selection without requiring client-side modifications.
+6. **Native Sender-Side Load Balancing**: SRT ACK and NAK control packets are broadcast over all connections, so the SRTLA sender reliably receives the feedback it needs to balance traffic across the links on its own.
 
 7. **Connection Recovery Mechanism**: Connections that show signs of recovery after temporary outages are given a chance to stabilize again.
 
 The implementation uses epoll for event-based network I/O, allowing efficient handling of multiple simultaneous connections.
 
-## Enhanced Load Balancing and Recovery
+## Connection Recovery
 
-This version of SRTLA includes improvements to address two key issues in the original implementation:
+Traffic distribution across the links is handled natively by the SRTLA sender (`srtla_send`), which selects connections based on per-link feedback (window size and in-flight packets). The receiver's job is to forward that feedback reliably — SRT ACK/NAK control packets are broadcast over all connections — so the sender can balance traffic on its own.
 
-### Problem 1: Connections with Issues Had No Recovery Path
+On top of that, this fork adds a recovery path for connections with temporary problems, which the original implementation lacked.
 
-In the original implementation, connections with temporary problems were completely disabled. In this enhanced version:
+### Connections with temporary issues can recover
+
+In the original implementation, connections with temporary problems were completely disabled. In this version:
 
 - Connections showing signs of recovery enter a "recovery mode"
 - These connections receive more frequent keepalive packets for a set period (5 seconds)
 - After successful recovery, they are fully reactivated for data transmission
 - Recovery attempts are abandoned after a certain time if unsuccessful
 
-This functionality allows connections to "heal" after brief disruptions (e.g., due to network issues) rather than remaining completely disabled.
-
-### Problem 2: Unbalanced Connection Utilization
-
-In the original implementation, load was unevenly distributed across available connections. The new implementation:
-
-- Introduces a monitoring and evaluation system for connection quality
-- Checks connection quality every 5 seconds based on:
-  - Bandwidth (kbits/s) and performance ratio (actual vs expected bandwidth)
-  - Packet loss rate
-  - Connection performance relative to median bandwidth
-- Assigns error points to each connection based on these metrics
-- Calculates a quality weight for each connection (10% to 100%)
-- Controls ACK packet frequency based on connection quality
-  - Good connections receive ACKs more frequently
-  - Poor connections receive ACKs less frequently
-- Indirectly influences the window size in the client and thus connection selection
-
-The result is better data distribution, with more stable connections carrying more load than problematic ones, without requiring client modifications.
-
-### Technical Implementation Details
-
-#### ACK Throttling
-
-The central innovation of this solution is ACK throttling for load distribution. It's based on the following principles:
-
-1. The SRT/SRTLA client (srtla_send) selects connections based on a score derived from the window size and in-flight packets.
-2. The window size in the client is adjusted when ACKs are received.
-3. By selectively throttling ACK frequency, we can indirectly control how quickly the window grows in the client.
-4. This causes the client to prefer better connections without requiring changes to the client code.
-
-#### Connection Quality Assessment
-
-Connection quality is assessed by measuring and analyzing:
-
-- **Bandwidth Performance**: The system calculates a performance ratio by comparing actual bandwidth to expected bandwidth. Poor performance relative to expectations leads to more error points
-- **Packet Loss**: Higher loss rates lead to more error points
-- **Dynamic Bandwidth Evaluation**: Connections are evaluated against either median bandwidth (for good connections) or minimum threshold (for poor connections)
-- **Grace Period**: New connections receive a 10-second grace period before penalties are applied
-
-The weight levels are:
-- 100% (WEIGHT_FULL): Optimal connection
-- 85% (WEIGHT_EXCELLENT): Excellent connection
-- 70% (WEIGHT_DEGRADED): Slightly impaired connection
-- 55% (WEIGHT_FAIR): Fair connection
-- 40% (WEIGHT_POOR): Severely impaired connection
-- 10% (WEIGHT_CRITICAL): Critically impaired connection
+This allows connections to "heal" after brief disruptions (e.g. due to network issues) rather than remaining completely disabled.
 
 #### Recovery Mechanism
-
-The recovery functionality works as follows:
 
 1. A connection that receives data again after being marked inactive is placed in recovery mode
 2. In this mode, keepalive packets are sent more frequently (every 1 second)
@@ -176,19 +130,6 @@ The following parameters can be adjusted to optimize behavior:
 
 - `KEEPALIVE_PERIOD`: Interval for keepalive packets during recovery (1 second)
 - `RECOVERY_CHANCE_PERIOD`: Period during which a connection can attempt to recover (5 seconds)
-- `CONN_QUALITY_EVAL_PERIOD`: Interval for evaluating connection quality (5 seconds)
-- `ACK_THROTTLE_INTERVAL`: Base interval for ACK throttling (100ms)
-- `MIN_ACK_RATE`: Minimum ACK rate to keep connections alive (20%)
-- `MIN_ACCEPTABLE_TOTAL_BANDWIDTH_KBPS`: Minimum total bandwidth for acceptable streaming quality (1000 kbps)
-- `GOOD_CONNECTION_THRESHOLD`: Threshold for considering a connection "good" (50% of max bandwidth)
-- `CONNECTION_GRACE_PERIOD`: Grace period in seconds before applying penalties (10 seconds)
-- Various weight levels (`WEIGHT_FULL`, `WEIGHT_EXCELLENT`, `WEIGHT_DEGRADED`, `WEIGHT_FAIR`, `WEIGHT_POOR`, `WEIGHT_CRITICAL`)
-
-### Limitations
-
-- The error point thresholds are static and could be dynamically adjusted to better adapt to different network situations
-- The throttling might be less effective with very short ACK intervals
-- Performance ratio calculations are based on bandwidth expectations that may need tuning for different network environments
 
 ## SRT Configuration Recommendations
 
