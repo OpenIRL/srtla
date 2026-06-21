@@ -105,6 +105,10 @@ struct srtla_conn_group {
     int srt_sock = -1;
     struct sockaddr last_addr = {};
 
+    // True once the group has forwarded a real SRT packet; a group that never
+    // does is a "ghost" (e.g. from a REG1 flood) and may be evicted under load.
+    bool data_seen = false;
+
     // Fields for SRTLA stats reporting
     uint32_t srt_dest_socket_id = 0;     // SRT destination socket ID (learned from forwarded packets)
     uint64_t last_stats_sent_ms = 0;     // Timestamp of last stats packet sent (ms)

@@ -131,6 +131,9 @@ inline void srtla_send_reg_err(struct sockaddr *addr)
   pad_sendto(srtla_sock, &header, sizeof(header), 0, addr, addr_len);
 }
 
+/* Defined after remove_group() below */
+bool evict_oldest_pending_group();
+
 /*
 Connection and group management functions
 */
@@ -318,7 +321,10 @@ void srtla_conn_group::remove_socket_info_file()
 }
 
 int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
-  if (conn_groups.size() >= MAX_GROUPS) {
+  // When the group table is full, try to reclaim a slot from a ghost group
+  // (registered but never streamed) before rejecting. This keeps an
+  // unauthenticated REG1 flood from locking out the real broadcaster.
+  if (conn_groups.size() >= MAX_GROUPS && !evict_oldest_pending_group()) {
     srtla_send_reg_err(addr);
     spdlog::error("[{}:{}] Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
     return -1;
@@ -369,6 +375,26 @@ void remove_group(srtla_conn_group_ptr group)
   conn_groups.erase(std::remove(conn_groups.begin(), conn_groups.end(), group), conn_groups.end());
 
   group.reset();
+}
+
+/* Reclaim a slot from the oldest "ghost" group — one with no connections that
+   has never carried real SRT traffic. Never touches a streaming group. Returns
+   true if one was evicted. */
+bool evict_oldest_pending_group() {
+  srtla_conn_group_ptr oldest;
+  for (auto &group : conn_groups) {
+    if (!group->conns.empty() || group->data_seen)
+      continue;
+    if (!oldest || group->created_at < oldest->created_at)
+      oldest = group;
+  }
+
+  if (!oldest)
+    return false;
+
+  spdlog::warn("[Group: {}] Evicting pending group to admit new registration (group table full)", static_cast<void *>(oldest.get()));
+  remove_group(oldest);
+  return true;
 }
 
 int conn_reg(struct sockaddr *addr, char *in_buf, time_t ts) {
@@ -569,6 +595,10 @@ static void process_srtla_packet(char (&buf)[MTU], int n, struct sockaddr &srtla
 
   // Record the most recently active peer
   g->last_addr = srtla_addr;
+
+  // Real SRT traffic: mark the group as no longer a "ghost", so it is exempt
+  // from ghost-group eviction under a REG1 flood.
+  g->data_seen = true;
 
   // For Problem 2: Update connection statistics
   c->stats.bytes_received += n;
