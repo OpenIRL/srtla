@@ -104,6 +104,13 @@ int const_time_cmp(const void *a, const void *b, int len) {
   return diff ? -1 : 0;
 }
 
+/* Fast equality for peer addresses. Unlike const_time_cmp (used for the secret
+   group ID), addresses are not secrets, so an early-exit memcmp is both correct
+   and faster in the per-packet lookup hot path. */
+static inline bool addr_equal(const struct sockaddr *a, const struct sockaddr *b) {
+  return memcmp(a, b, addr_len) == 0;
+}
+
 inline std::vector<char> get_random_bytes(size_t size)
 {
   std::vector<char> ret;
@@ -148,13 +155,13 @@ srtla_conn_group_ptr group_find_by_id(char *id) {
 void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_conn_ptr &rc) {
   for (auto &group : conn_groups) {
     for (auto &conn : group->conns) {
-      if (const_time_cmp(&(conn->addr), addr, addr_len) == 0) {
+      if (addr_equal(&conn->addr, addr)) {
         rg = group;
         rc = conn;
         return;
       }
     }
-    if (const_time_cmp(&group->last_addr, addr, addr_len) == 0) {
+    if (addr_equal(&group->last_addr, addr)) {
       rg = group;
       rc = nullptr;
       return;
