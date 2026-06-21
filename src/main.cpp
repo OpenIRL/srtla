@@ -18,6 +18,11 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+/* recvmmsg()/sendmmsg() and struct mmsghdr are GNU extensions on glibc */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,6 +31,7 @@
 #include <netdb.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
@@ -64,6 +70,9 @@ std::vector<srtla_conn_group_ptr> conn_groups;
 Async I/O support
 */
 #define MAX_EPOLL_EVENTS 10
+
+/* Number of SRTLA packets to receive per recvmmsg() syscall */
+#define RECV_BATCH_SIZE 64
 
 int socket_epoll;
 
@@ -434,10 +443,27 @@ void handle_srt_data(srtla_conn_group_ptr g) {
 
   // Broadcast SRT ACKs and NAKs over all connections for timely delivery
   if (is_srt_ack(buf, n) || is_srt_nak(buf, n)) {
+    // Send to every connection in a single sendmmsg() syscall
+    struct mmsghdr msgs[MAX_CONNS_PER_GROUP];
+    struct iovec iovecs[MAX_CONNS_PER_GROUP];
+    unsigned int cnt = 0;
     for (auto &conn : g->conns) {
-      int ret = sendto(srtla_sock, &buf, n, 0, &conn->addr, addr_len);
-      if (ret != n) {
-        spdlog::error("[{}:{}] [Group: {}] Failed to send the SRT packet", print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(g.get()));
+      if (cnt >= MAX_CONNS_PER_GROUP) break;
+      iovecs[cnt].iov_base = buf;
+      iovecs[cnt].iov_len = n;
+      msgs[cnt].msg_hdr = {};
+      msgs[cnt].msg_hdr.msg_name = &conn->addr;
+      msgs[cnt].msg_hdr.msg_namelen = addr_len;
+      msgs[cnt].msg_hdr.msg_iov = &iovecs[cnt];
+      msgs[cnt].msg_hdr.msg_iovlen = 1;
+      cnt++;
+    }
+    if (cnt > 0) {
+      int sent = sendmmsg(srtla_sock, msgs, cnt, 0);
+      if (sent < 0) {
+        spdlog::error("[Group: {}] Failed to broadcast the SRT packet: {}", static_cast<void *>(g.get()), strerror(errno));
+      } else if (static_cast<unsigned int>(sent) < cnt) {
+        spdlog::warn("[Group: {}] Broadcast sent only {}/{} messages", static_cast<void *>(g.get()), sent, cnt);
       }
     }
   } else {
@@ -496,18 +522,7 @@ void register_packet(srtla_conn_group_ptr group, srtla_conn_ptr conn, int32_t sn
   }
 }
 
-void handle_srtla_data(time_t ts) {
-  char buf[MTU] = {};
-
-  // Get the packet
-  struct sockaddr srtla_addr;
-  socklen_t len = addr_len;
-  int n = recvfrom(srtla_sock, &buf, MTU, 0, &srtla_addr, &len);
-  if (n < 0) {
-    spdlog::error("Failed to read an srtla packet");
-    return;
-  }
-
+static void process_srtla_packet(char (&buf)[MTU], int n, struct sockaddr &srtla_addr, time_t ts) {
   // Handle srtla registration packets
   if (is_srtla_reg1(buf, n)) {
     register_group(&srtla_addr, buf, ts);
@@ -693,6 +708,43 @@ void handle_srtla_data(time_t ts) {
   if (ret != n) {
     spdlog::error("[Group: {}] Failed to forward SRTLA packet, terminating the group", static_cast<void *>(g.get()));
     remove_group(g);
+  }
+}
+
+/*
+  Receive a batch of SRTLA packets in a single recvmmsg() syscall and process
+  each one. Batching amortizes the per-packet syscall overhead, which matters
+  at high bitrate with many bonded connections. Each packet re-resolves its own
+  group by source address, so a group removed mid-batch cannot leave a stale
+  reference behind.
+*/
+void handle_srtla_data(time_t ts) {
+  struct iovec iovecs[RECV_BATCH_SIZE];
+  struct mmsghdr msgs[RECV_BATCH_SIZE];
+  char bufs[RECV_BATCH_SIZE][MTU];
+  struct sockaddr addrs[RECV_BATCH_SIZE];
+
+  for (int i = 0; i < RECV_BATCH_SIZE; i++) {
+    iovecs[i].iov_base = bufs[i];
+    iovecs[i].iov_len = MTU;
+    msgs[i].msg_hdr = {};
+    msgs[i].msg_hdr.msg_name = &addrs[i];
+    msgs[i].msg_hdr.msg_namelen = addr_len;
+    msgs[i].msg_hdr.msg_iov = &iovecs[i];
+    msgs[i].msg_hdr.msg_iovlen = 1;
+  }
+
+  int num_msgs = recvmmsg(srtla_sock, msgs, RECV_BATCH_SIZE, MSG_DONTWAIT, nullptr);
+  if (num_msgs < 0) {
+    if (errno != EAGAIN && errno != EWOULDBLOCK)
+      spdlog::error("Failed to read srtla packets: {}", strerror(errno));
+    return;
+  }
+
+  for (int i = 0; i < num_msgs; i++) {
+    int n = static_cast<int>(msgs[i].msg_len);
+    if (n > 0)
+      process_srtla_packet(bufs[i], n, addrs[i], ts);
   }
 }
 
