@@ -18,6 +18,13 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+#pragma once
+
+#include <cstdint>
+#include <ctime>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
 #define MTU 1500
 
 #define SRT_TYPE_HANDSHAKE   0x8000

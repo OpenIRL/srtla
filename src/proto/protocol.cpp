@@ -19,17 +19,17 @@
 */
 
 #include <endian.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
 
-#include "common.h"
+#include "proto/protocol.h"
 
 #define ADDR_BUF_SZ 50
-char _global_addr_buf[ADDR_BUF_SZ];
+static char _global_addr_buf[ADDR_BUF_SZ];
 const char *print_addr(struct sockaddr *addr) {
   struct sockaddr_in *ain = (struct sockaddr_in *)addr;
   return inet_ntop(ain->sin_family, &ain->sin_addr, _global_addr_buf, ADDR_BUF_SZ);
@@ -42,7 +42,7 @@ int port_no(struct sockaddr *addr) {
 
 int parse_ip(struct sockaddr_in *addr, char *ip_str) {
   in_addr_t ip = inet_addr(ip_str);
-  if (ip == -1) return -1;
+  if (ip == (in_addr_t)-1) return -1;
 
   memset(addr, 0, sizeof(*addr));
   addr->sin_family = AF_INET;

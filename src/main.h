@@ -24,9 +24,7 @@
 
 #include <spdlog/spdlog.h>
 
-extern "C" {
-#include "common.h"
-}
+#include "proto/protocol.h"
 
 #define MAX_CONNS_PER_GROUP 16
 #define MAX_GROUPS          200
