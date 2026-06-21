@@ -9,10 +9,16 @@ endif()
 
 find_package(spdlog REQUIRED)
 
-# Core library: shared code extracted from the monolithic main.cpp.
-# This target grows as further modules are split out (net, conn, registry, packet).
+# Core library: the daemon's logic, split into focused modules. main.cpp is a
+# thin entrypoint that links against this.
 add_library(srtla_core STATIC
-    src/proto/protocol.cpp)
+    src/proto/protocol.cpp
+    src/core/state.cpp
+    src/core/conn.cpp
+    src/core/registry.cpp
+    src/net/socket_util.cpp
+    src/net/srt_handler.cpp
+    src/net/srtla_handler.cpp)
 target_include_directories(srtla_core PUBLIC src)
 target_link_libraries(srtla_core PUBLIC spdlog::spdlog)
 target_compile_features(srtla_core PUBLIC cxx_std_17)

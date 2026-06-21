@@ -18,31 +18,20 @@
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+// The SRTLA connection / group domain model: a group bundles the bonded
+// connections of one broadcaster and owns the downstream SRT socket.
+
 #pragma once
 
+#include <array>
+#include <cstdint>
+#include <ctime>
 #include <memory>
+#include <vector>
+#include <sys/socket.h>
 
-#include <spdlog/spdlog.h>
-
+#include "core/config.h"
 #include "proto/protocol.h"
-
-#define MAX_CONNS_PER_GROUP 16
-#define MAX_GROUPS          200
-
-#define CLEANUP_PERIOD 3
-#define GROUP_TIMEOUT  4
-#define CONN_TIMEOUT   4
-
-// Adjustment for Problem 1: Shorter keepalive period for recovery
-#define KEEPALIVE_PERIOD 1
-#define RECOVERY_CHANCE_PERIOD 5
-
-#define RECV_ACK_INT 10
-
-#define SEND_BUF_SIZE (100 * 1024 * 1024)
-#define RECV_BUF_SIZE (100 * 1024 * 1024)
-
-#define SRT_SOCKET_INFO_PREFIX "/tmp/srtla-group-"
 
 struct connection_stats {
     uint64_t bytes_received;         // Total received bytes (including retransmissions)
@@ -66,7 +55,7 @@ struct srtla_conn {
     time_t last_rcvd = 0;
     int recv_idx = 0;
     std::array<uint32_t, RECV_ACK_INT> recv_log;
-    
+
     // Fields for connection quality evaluation
     connection_stats stats = {};
     time_t recovery_start = 0; // Time when the connection began to recover
@@ -100,7 +89,7 @@ struct srtla_conn_group {
 
     srtla_conn_group(char *client_id, time_t ts);
     ~srtla_conn_group();
-  void close_srt_socket();
+    void close_srt_socket();
 
     std::vector<struct sockaddr> get_client_addresses();
     void write_socket_info_file();
@@ -108,11 +97,6 @@ struct srtla_conn_group {
     void send_stats_to_srt();
 };
 typedef std::shared_ptr<srtla_conn_group> srtla_conn_group_ptr;
-
-struct srtla_ack_pkt {
-    uint32_t type;
-    uint32_t acks[RECV_ACK_INT];
-};
 
 void send_keepalive(srtla_conn_ptr c, time_t ts);
 bool conn_timed_out(srtla_conn_ptr c, time_t ts);
