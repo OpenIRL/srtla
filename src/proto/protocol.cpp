@@ -2,7 +2,7 @@
     srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
     Copyright (C) 2020-2021 BELABOX project
     Copyright (C) 2024 IRLToolkit Inc.
-    Copyright (C) 2024 OpenIRL
+    Copyright (C) 2024-2026 OpenIRL
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by
@@ -19,17 +19,17 @@
 */
 
 #include <endian.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
 
-#include "common.h"
+#include "proto/protocol.h"
 
 #define ADDR_BUF_SZ 50
-char _global_addr_buf[ADDR_BUF_SZ];
+static char _global_addr_buf[ADDR_BUF_SZ];
 const char *print_addr(struct sockaddr *addr) {
   struct sockaddr_in *ain = (struct sockaddr_in *)addr;
   return inet_ntop(ain->sin_family, &ain->sin_addr, _global_addr_buf, ADDR_BUF_SZ);
@@ -42,7 +42,7 @@ int port_no(struct sockaddr *addr) {
 
 int parse_ip(struct sockaddr_in *addr, char *ip_str) {
   in_addr_t ip = inet_addr(ip_str);
-  if (ip == -1) return -1;
+  if (ip == (in_addr_t)-1) return -1;
 
   memset(addr, 0, sizeof(*addr));
   addr->sin_family = AF_INET;
@@ -92,6 +92,21 @@ uint16_t get_srt_type(void *pkt, int n) {
 
 int is_srt_ack(void *pkt, int n) {
   return get_srt_type(pkt, n) == SRT_TYPE_ACK;
+}
+
+int is_srt_nak(void *pkt, int n) {
+  return get_srt_type(pkt, n) == SRT_TYPE_NAK;
+}
+
+int is_srt_shutdown(void *pkt, int n) {
+  return get_srt_type(pkt, n) == SRT_TYPE_SHUTDOWN;
+}
+
+int is_srt_induction(void *pkt, int n) {
+  if (n < (int)sizeof(srt_handshake_t)) return 0;
+  if (get_srt_type(pkt, n) != SRT_TYPE_HANDSHAKE) return 0;
+  srt_handshake_t *hs = (srt_handshake_t *)pkt;
+  return be32toh(hs->handshake_type) == 1;
 }
 
 int is_srtla_keepalive(void *pkt, int n) {

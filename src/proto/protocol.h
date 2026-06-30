@@ -2,7 +2,7 @@
     srtla_rec - SRT transport proxy with link aggregation, forked by IRLToolkit
     Copyright (C) 2020-2021 BELABOX project
     Copyright (C) 2024 IRLToolkit Inc.
-    Copyright (C) 2024 OpenIRL
+    Copyright (C) 2024-2026 OpenIRL
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published by
@@ -17,6 +17,13 @@
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
+
+#pragma once
+
+#include <cstdint>
+#include <ctime>
+#include <sys/socket.h>
+#include <netinet/in.h>
 
 #define MTU 1500
 
@@ -33,6 +40,7 @@
 #define SRTLA_TYPE_REG_ERR   0x9210
 #define SRTLA_TYPE_REG_NGP   0x9211
 #define SRTLA_TYPE_REG_NAK   0x9212
+#define SRTLA_TYPE_STATS     0x9300
 
 #define SRTLA_EXT_IRLTK_CIP_REQ 0xA000
 #define SRTLA_EXT_IRLTK_CIP_RES 0xA001
@@ -85,7 +93,9 @@ int parse_port(char *port_str);
 int32_t get_srt_sn(void *pkt, int n);
 uint16_t get_srt_type(void *pkt, int n);
 int is_srt_ack(void *pkt, int n);
+int is_srt_nak(void *pkt, int n);
 int is_srt_shutdown(void *pkt, int n);
+int is_srt_induction(void *pkt, int n);
 
 int is_srtla_keepalive(void *pkt, int len);
 int is_srtla_reg1(void *pkt, int len);

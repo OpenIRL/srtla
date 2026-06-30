@@ -2,7 +2,7 @@
 
 ## Overview
 
-srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to transport [SRT](https://github.com/Haivision/srt/) traffic over multiple network links for capacity aggregation and redundancy. Traffic is balanced dynamically depending on network conditions. The primary application is bonding mobile modems for live streaming.
+srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to transport [SRT](https://github.com/Haivision/srt/) traffic over multiple network links for capacity aggregation and redundancy. Traffic is balanced across the links by the SRTLA sender based on per-link feedback. The primary application is bonding mobile modems for live streaming.
 
 > **Note**: This is a fork of the original SRTLA implementation by BELABOX. The original server component (srtla_rec) was marked as unsupported by BELABOX.
 
@@ -12,6 +12,8 @@ srtla_rec is an SRT transport proxy with link aggregation. SRTLA is designed to 
 - Automatic management of connection groups and individual connections
 - Robust error handling and timeouts for inactive connections
 - Logging of connection details for easy diagnostics
+- Reliable forwarding of SRT ACK/NAK feedback over all links so the sender can balance traffic natively
+- Connection recovery mechanism for temporary network issues
 
 ## Requirements
 
@@ -54,12 +56,12 @@ srtla_rec runs as a proxy between SRTla clients and an SRT server:
 - `--srtla_port PORT`: Port to bind the SRTLA socket to (default: 5000)
 - `--srt_hostname HOST`: Hostname of the downstream SRT server (default: 127.0.0.1)
 - `--srt_port PORT`: Port of the downstream SRT server (default: 4001)
-- `--verbose`: Enable verbose logging (default: disabled)
+- `--log_level LEVEL`: Logging level — one of `trace`, `debug`, `info`, `warn`, `error`, `critical` (default: info)
 
 ### Example
 
 ```bash
-./srtla_rec --srtla_port 5000 --srt_hostname 192.168.1.10 --srt_port 4001 --verbose
+./srtla_rec --srtla_port 5000 --srt_hostname 192.168.1.10 --srt_port 4001 --log_level debug
 ```
 
 ## How It Works
@@ -92,7 +94,42 @@ SRTLA implements a protocol for packet transmission over multiple network connec
 
 5. **Connection Cleanup**: Inactive connections and groups are automatically cleaned up after a configurable timeout (default: 10 seconds).
 
+6. **Native Sender-Side Load Balancing**: SRT ACK and NAK control packets are broadcast over all connections, so the SRTLA sender reliably receives the feedback it needs to balance traffic across the links on its own.
+
+7. **Connection Recovery Mechanism**: Connections that show signs of recovery after temporary outages are given a chance to stabilize again.
+
 The implementation uses epoll for event-based network I/O, allowing efficient handling of multiple simultaneous connections.
+
+## Connection Recovery
+
+Traffic distribution across the links is handled natively by the SRTLA sender (`srtla_send`), which selects connections based on per-link feedback (window size and in-flight packets). The receiver's job is to forward that feedback reliably — SRT ACK/NAK control packets are broadcast over all connections — so the sender can balance traffic on its own.
+
+On top of that, this fork adds a recovery path for connections with temporary problems, which the original implementation lacked.
+
+### Connections with temporary issues can recover
+
+In the original implementation, connections with temporary problems were completely disabled. In this version:
+
+- Connections showing signs of recovery enter a "recovery mode"
+- These connections receive more frequent keepalive packets for a set period (5 seconds)
+- After successful recovery, they are fully reactivated for data transmission
+- Recovery attempts are abandoned after a certain time if unsuccessful
+
+This allows connections to "heal" after brief disruptions (e.g. due to network issues) rather than remaining completely disabled.
+
+#### Recovery Mechanism
+
+1. A connection that receives data again after being marked inactive is placed in recovery mode
+2. In this mode, keepalive packets are sent more frequently (every 1 second)
+3. If the connection remains stable for a short period (5 seconds), it is considered recovered
+4. If recovery does not occur within the time window, the recovery attempt is aborted
+
+### Configuration Parameters
+
+The following parameters can be adjusted to optimize behavior:
+
+- `KEEPALIVE_PERIOD`: Interval for keepalive packets during recovery (1 second)
+- `RECOVERY_CHANCE_PERIOD`: Period during which a connection can attempt to recover (5 seconds)
 
 ## SRT Configuration Recommendations
 
@@ -108,6 +145,6 @@ This project is licensed under the [GNU Affero General Public License v3.0](LICE
 
 - Copyright (C) 2020-2021 BELABOX project
 - Copyright (C) 2024 IRLToolkit Inc.
-- Copyright (C) 2024 OpenIRL
+- Copyright (C) 2024-2026 OpenIRL
 
 You can use, modify, and distribute this code according to the terms of the AGPL-3.0.
