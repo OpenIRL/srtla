@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 
 #include <endian.h>
 #include <sys/socket.h>
@@ -64,16 +65,8 @@ void group_find_by_addr(struct sockaddr *addr, srtla_conn_group_ptr &rg, srtla_c
 }
 
 int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
-  // When the group table is full, try to reclaim a slot from a ghost group
-  // (registered but never streamed) before rejecting. This keeps an
-  // unauthenticated REG1 flood from locking out the real broadcaster.
-  if (conn_groups.size() >= MAX_GROUPS && !evict_oldest_pending_group()) {
-    srtla_send_reg_err(addr);
-    spdlog::error("[{}:{}] Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
-    return -1;
-  }
-
-  // If this remote address is already registered, abort
+  // Reject an already-registered remote address before touching the group
+  // table, so a re-REG1 can never evict an unrelated pending group.
   srtla_conn_group_ptr group;
   srtla_conn_ptr conn;
   group_find_by_addr(addr, group, conn);
@@ -83,9 +76,24 @@ int register_group(struct sockaddr *addr, char *in_buf, time_t ts) {
     return -1;
   }
 
+  // When the group table is full, try to reclaim a slot from a ghost group
+  // (registered but never streamed) before rejecting. This keeps an
+  // unauthenticated REG1 flood from locking out the real broadcaster.
+  if (conn_groups.size() >= MAX_GROUPS && !evict_oldest_pending_group()) {
+    srtla_send_reg_err(addr);
+    spdlog::error("[{}:{}] Group registration failed: Max groups reached", print_addr(addr), port_no(addr));
+    return -1;
+  }
+
   // Allocate the group
   char *client_id = in_buf + 2;
-  group = std::make_shared<srtla_conn_group>(client_id, ts);
+  try {
+    group = std::make_shared<srtla_conn_group>(client_id, ts);
+  } catch (const std::exception &e) {
+    srtla_send_reg_err(addr);
+    spdlog::error("[{}:{}] Group registration failed: {}", print_addr(addr), port_no(addr), e.what());
+    return -1;
+  }
 
   /* Record the address used to register the group
      It won't be allowed to register another group while this one is active */

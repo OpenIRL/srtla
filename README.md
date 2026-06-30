@@ -56,12 +56,12 @@ srtla_rec runs as a proxy between SRTla clients and an SRT server:
 - `--srtla_port PORT`: Port to bind the SRTLA socket to (default: 5000)
 - `--srt_hostname HOST`: Hostname of the downstream SRT server (default: 127.0.0.1)
 - `--srt_port PORT`: Port of the downstream SRT server (default: 4001)
-- `--verbose`: Enable verbose logging (default: disabled)
+- `--log_level LEVEL`: Logging level — one of `trace`, `debug`, `info`, `warn`, `error`, `critical` (default: info)
 
 ### Example
 
 ```bash
-./srtla_rec --srtla_port 5000 --srt_hostname 192.168.1.10 --srt_port 4001 --verbose
+./srtla_rec --srtla_port 5000 --srt_hostname 192.168.1.10 --srt_port 4001 --log_level debug
 ```
 
 ## How It Works

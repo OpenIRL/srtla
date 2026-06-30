@@ -106,6 +106,15 @@ void srtla_conn_group::close_srt_socket()
   last_stats_sent_ms = 0;
 }
 
+// Signed distance between two SRT data sequence numbers, wrap-safe over the
+// 31-bit sequence space (bit 31 is the control flag and is always 0 here).
+static inline int32_t srt_sn_diff(int32_t a, int32_t b)
+{
+  int64_t d = (static_cast<int64_t>(a) - b) & 0x7FFFFFFF;  // 0 .. 2^31-1
+  if (d >= 0x40000000) d -= 0x80000000;                    // wrap to signed
+  return static_cast<int32_t>(d);
+}
+
 bool srtla_conn_group::track_data_sn(int32_t sn)
 {
   if (sn_window_base < 0) {
@@ -113,20 +122,20 @@ bool srtla_conn_group::track_data_sn(int32_t sn)
     sn_window_base = sn;
   }
 
-  int32_t offset = sn - sn_window_base;
+  int32_t offset = srt_sn_diff(sn, sn_window_base);
 
   // Before our window - old packet / retransmission
   if (offset < 0) return false;
 
   // Beyond window - advance
   if (offset >= SN_WINDOW_SIZE) {
-    int32_t new_base = sn - SN_WINDOW_SIZE / 2;
-    int32_t advance = new_base - sn_window_base;
-    if (advance >= SN_WINDOW_SIZE) {
+    int32_t new_base = (sn - SN_WINDOW_SIZE / 2) & 0x7FFFFFFF;
+    int32_t advance = srt_sn_diff(new_base, sn_window_base);
+    if (advance < 0 || advance >= SN_WINDOW_SIZE) {
       std::fill(sn_window.begin(), sn_window.end(), false);
     } else {
       for (int32_t i = 0; i < advance; i++) {
-        sn_window[(sn_window_base + i) & (SN_WINDOW_SIZE - 1)] = false;
+        sn_window[(static_cast<uint32_t>(sn_window_base) + static_cast<uint32_t>(i)) & (SN_WINDOW_SIZE - 1)] = false;
       }
     }
     sn_window_base = new_base;

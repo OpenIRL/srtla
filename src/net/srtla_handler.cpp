@@ -116,7 +116,9 @@ static bool try_echo_keepalive(srtla_conn_group_ptr &g, char (&buf)[MTU], int n,
 // Only updated for in-order packets — out-of-order arrivals (common with SRTLA
 // multi-path) would produce bogus values from the unsigned timestamp diff.
 static void update_jitter(srtla_conn_ptr &c, char (&buf)[MTU]) {
-  uint32_t srt_ts = be32toh(reinterpret_cast<uint32_t *>(buf)[2]);
+  uint32_t srt_ts;
+  std::memcpy(&srt_ts, buf + 8, sizeof(srt_ts));
+  srt_ts = be32toh(srt_ts);
   uint64_t arrival_us;
   struct timespec tp;
   clock_gettime(CLOCK_MONOTONIC, &tp);
@@ -264,10 +266,17 @@ static void learn_dest_socket_id(srtla_conn_group_ptr &g, char (&buf)[MTU], int 
 // Forward an SRT packet to the downstream server, removing the group on failure.
 static void forward_to_srt(srtla_conn_group_ptr &g, char (&buf)[MTU], int n) {
   int ret = send(g->srt_sock, &buf, n, 0);
-  if (ret != n) {
-    spdlog::error("[Group: {}] Failed to forward SRTLA packet, terminating the group", static_cast<void *>(g.get()));
-    remove_group(g);
+  if (ret == n)
+    return;
+
+  // Non-blocking backpressure: drop this packet, keep the session alive.
+  if (ret < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+    spdlog::debug("[Group: {}] SRT send backpressure, dropped a packet", static_cast<void *>(g.get()));
+    return;
   }
+
+  spdlog::error("[Group: {}] Failed to forward SRTLA packet, terminating the group", static_cast<void *>(g.get()));
+  remove_group(g);
 }
 
 static void process_srtla_packet(char (&buf)[MTU], int n, struct sockaddr &srtla_addr, time_t ts) {

@@ -20,9 +20,9 @@
 
 #include "net/socket_util.h"
 
-#include <cassert>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
 
 #include <arpa/inet.h>
 #include <endian.h>
@@ -77,10 +77,10 @@ std::vector<char> get_random_bytes(size_t size)
   std::vector<char> ret;
   ret.resize(size);
 
-  std::ifstream f("/dev/urandom");
+  std::ifstream f("/dev/urandom", std::ios::binary);
   f.read(ret.data(), size);
-  assert(f); // Failed to read fully!
-  f.close();
+  if (!f || static_cast<size_t>(f.gcount()) != size)
+    throw std::runtime_error("get_random_bytes: short read from /dev/urandom");
 
   return ret;
 }

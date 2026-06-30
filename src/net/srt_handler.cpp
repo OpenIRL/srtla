@@ -45,11 +45,17 @@ void handle_srt_data(srtla_conn_group_ptr g) {
     return;
 
   int n = recv(g->srt_sock, &buf, MTU, 0);
-  if (n < SRT_MIN_LEN) {
+  if (n < 0) {
+    // Transient non-blocking read: nothing available right now, keep the group.
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      return;
     spdlog::error("[Group: {}] Failed to read the SRT sock, terminating the group", static_cast<void *>(g.get()));
     remove_group(g);
     return;
   }
+  // Ignore runt datagrams without tearing down the session.
+  if (n < SRT_MIN_LEN)
+    return;
 
   // Broadcast SRT ACKs and NAKs over all connections for timely delivery
   if (is_srt_ack(buf, n) || is_srt_nak(buf, n)) {
