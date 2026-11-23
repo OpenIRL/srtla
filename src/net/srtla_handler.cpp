@@ -51,23 +51,30 @@ struct srtla_ack_pkt {
     uint32_t acks[RECV_ACK_INT];
 };
 
-// Accumulate received sequence numbers and emit an SRTLA ACK every RECV_ACK_INT
-// packets so the sender can grow its per-link window.
+static int send_srtla_ack(const srtla_ack_pkt &ack, size_t len, const struct sockaddr &addr) {
+  // Carrier padding would add sequence numbers to the ACK.
+  return sendto(srtla_sock, &ack, len, 0, &addr, addr_len);
+}
+
+// Acknowledge startup DATA immediately, then use the normal batch cadence.
 static void register_packet(srtla_conn_group_ptr group, srtla_conn_ptr conn, int32_t sn) {
   // store the sequence numbers in BE, as they're transmitted over the network
   conn->recv_log[conn->recv_idx++] = htobe32(sn);
 
-  if (conn->recv_idx == RECV_ACK_INT) {
+  if (conn->early_acks_left || conn->recv_idx == RECV_ACK_INT) {
     srtla_ack_pkt ack;
     ack.type = htobe32(SRTLA_TYPE_ACK << 16);
-    std::memcpy(&ack.acks, conn->recv_log.begin(), sizeof(uint32_t) * conn->recv_log.max_size());
+    const size_t acks_len = sizeof(uint32_t) * conn->recv_idx;
+    std::memcpy(&ack.acks, conn->recv_log.data(), acks_len);
+    const size_t ack_len = sizeof(ack.type) + acks_len;
 
-    int ret = sendto(srtla_sock, &ack, sizeof(ack), 0, &conn->addr, addr_len);
-    if (ret != sizeof(ack)) {
+    int ret = send_srtla_ack(ack, ack_len, conn->addr);
+    if (ret != static_cast<int>(ack_len)) {
       spdlog::error("[{}:{}] [Group: {}] Failed to send the SRTLA ACK",
           print_addr(&conn->addr), port_no(&conn->addr), static_cast<void *>(group.get()));
     }
 
+    if (conn->early_acks_left) --conn->early_acks_left;
     conn->recv_idx = 0;
   }
 }
