@@ -54,6 +54,7 @@ struct srtla_conn {
     struct sockaddr addr = {};
     time_t last_rcvd = 0;
     int recv_idx = 0;
+    unsigned int early_acks_left = 3;
     std::array<uint32_t, RECV_ACK_INT> recv_log;
 
     // Fields for connection quality evaluation
